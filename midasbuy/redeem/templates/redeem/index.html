@@ -1,0 +1,409 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>PUBG UC Redeem — Midasbuy</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      min-height: 100vh;
+      background: #0a0c10;
+      background-image:
+        radial-gradient(ellipse 80% 50% at 50% -10%, rgba(251,188,4,0.12) 0%, transparent 70%),
+        radial-gradient(ellipse 60% 40% at 80% 80%, rgba(255,100,0,0.07) 0%, transparent 60%);
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      color: #e8e8e8;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+    }
+
+    .card {
+      width: 100%;
+      max-width: 480px;
+      background: rgba(255,255,255,0.04);
+      border: 1px solid rgba(255,255,255,0.08);
+      border-radius: 20px;
+      padding: 40px 36px;
+      backdrop-filter: blur(12px);
+      box-shadow: 0 24px 64px rgba(0,0,0,0.5);
+    }
+
+    .logo {
+      text-align: center;
+      margin-bottom: 32px;
+    }
+    .logo .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      background: rgba(251,188,4,0.1);
+      border: 1px solid rgba(251,188,4,0.25);
+      border-radius: 50px;
+      padding: 8px 18px;
+    }
+    .logo .badge svg { width: 22px; height: 22px; fill: #fbbc04; }
+    .logo .badge span { font-size: 14px; font-weight: 600; color: #fbbc04; letter-spacing: 0.5px; }
+
+    h1 {
+      font-size: 24px;
+      font-weight: 700;
+      text-align: center;
+      margin-bottom: 6px;
+      background: linear-gradient(135deg, #fff 40%, #fbbc04);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+    }
+    .subtitle {
+      text-align: center;
+      font-size: 13px;
+      color: rgba(255,255,255,0.4);
+      margin-bottom: 32px;
+    }
+
+    /* ── Step sections ────────────────────────────────────────── */
+    .step { margin-bottom: 28px; }
+
+    .step-label {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 10px;
+    }
+    .step-label .num {
+      width: 24px; height: 24px;
+      border-radius: 50%;
+      background: rgba(251,188,4,0.15);
+      border: 1px solid rgba(251,188,4,0.4);
+      color: #fbbc04;
+      font-size: 12px;
+      font-weight: 700;
+      display: flex; align-items: center; justify-content: center;
+      flex-shrink: 0;
+    }
+    .step-label span { font-size: 13px; font-weight: 600; color: rgba(255,255,255,0.7); }
+
+    .input-row {
+      display: flex;
+      gap: 8px;
+    }
+
+    input[type="text"], input[type="password"] {
+      flex: 1;
+      background: rgba(255,255,255,0.05);
+      border: 1px solid rgba(255,255,255,0.1);
+      border-radius: 10px;
+      padding: 12px 14px;
+      font-size: 14px;
+      color: #fff;
+      outline: none;
+      transition: border-color 0.2s, box-shadow 0.2s;
+    }
+    input::placeholder { color: rgba(255,255,255,0.25); }
+    input:focus {
+      border-color: rgba(251,188,4,0.5);
+      box-shadow: 0 0 0 3px rgba(251,188,4,0.08);
+    }
+
+    .btn {
+      padding: 12px 18px;
+      border: none;
+      border-radius: 10px;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.2s;
+      white-space: nowrap;
+    }
+    .btn-primary {
+      background: linear-gradient(135deg, #fbbc04, #f59e0b);
+      color: #0a0c10;
+    }
+    .btn-primary:hover { filter: brightness(1.1); transform: translateY(-1px); }
+    .btn-primary:active { transform: translateY(0); }
+    .btn-primary:disabled { opacity: 0.4; cursor: not-allowed; transform: none; }
+
+    .btn-redeem {
+      width: 100%;
+      padding: 14px;
+      font-size: 15px;
+      background: linear-gradient(135deg, #f97316, #ef4444);
+      color: #fff;
+      border-radius: 12px;
+    }
+    .btn-redeem:hover { filter: brightness(1.1); transform: translateY(-1px); }
+    .btn-redeem:disabled { opacity: 0.4; cursor: not-allowed; transform: none; }
+
+    /* ── Player info card ─────────────────────────────────────── */
+    .player-card {
+      display: none;
+      background: rgba(251,188,4,0.06);
+      border: 1px solid rgba(251,188,4,0.2);
+      border-radius: 12px;
+      padding: 14px 16px;
+      margin-top: 12px;
+    }
+    .player-card.show { display: block; }
+
+    .player-row { display: flex; justify-content: space-between; align-items: center; }
+    .player-name {
+      font-size: 16px;
+      font-weight: 700;
+      color: #fbbc04;
+    }
+    .player-meta {
+      font-size: 11px;
+      color: rgba(255,255,255,0.4);
+      margin-top: 3px;
+    }
+    .player-id-badge {
+      font-size: 11px;
+      background: rgba(255,255,255,0.07);
+      border-radius: 6px;
+      padding: 4px 8px;
+      color: rgba(255,255,255,0.5);
+    }
+
+    /* ── Divider ──────────────────────────────────────────────── */
+    .divider {
+      border: none;
+      border-top: 1px solid rgba(255,255,255,0.07);
+      margin: 24px 0;
+    }
+
+    /* ── Status messages ─────────────────────────────────────── */
+    .status {
+      display: none;
+      border-radius: 10px;
+      padding: 12px 14px;
+      font-size: 13px;
+      font-weight: 500;
+      margin-top: 14px;
+      line-height: 1.5;
+    }
+    .status.show { display: block; }
+    .status.success { background: rgba(34,197,94,0.12); border: 1px solid rgba(34,197,94,0.3); color: #4ade80; }
+    .status.error   { background: rgba(239,68,68,0.12);  border: 1px solid rgba(239,68,68,0.3);  color: #f87171; }
+    .status.loading { background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1); color: rgba(255,255,255,0.5); }
+
+    /* ── Spinner ──────────────────────────────────────────────── */
+    .spinner {
+      display: inline-block;
+      width: 12px; height: 12px;
+      border: 2px solid rgba(255,255,255,0.3);
+      border-top-color: #fbbc04;
+      border-radius: 50%;
+      animation: spin 0.7s linear infinite;
+      margin-right: 6px;
+      vertical-align: middle;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* ── Country selector ─────────────────────────────────────── */
+    select {
+      background: rgba(255,255,255,0.05);
+      border: 1px solid rgba(255,255,255,0.1);
+      border-radius: 10px;
+      padding: 12px 14px;
+      font-size: 13px;
+      color: rgba(255,255,255,0.6);
+      outline: none;
+      cursor: pointer;
+    }
+    select option { background: #1a1c20; }
+  </style>
+</head>
+<body>
+<div class="card">
+
+  <div class="logo">
+    <div class="badge">
+      <svg viewBox="0 0 24 24"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 14H9V8h2v8zm4 0h-2V8h2v8z"/></svg>
+      <span>MIDASBUY · PUBG UC REDEEM</span>
+    </div>
+  </div>
+
+  <h1>Redeem Your UC Code</h1>
+  <p class="subtitle">Enter your player ID to verify, then submit your pin code</p>
+
+  <!-- ── Step 1: Player lookup ───────────────────────────── -->
+  <div class="step">
+    <div class="step-label">
+      <div class="num">1</div>
+      <span>Enter PUBG Mobile Player ID</span>
+    </div>
+
+    <div class="input-row">
+      <input id="playerIdInput" type="text" placeholder="e.g. 5123456789" autocomplete="off" />
+      <select id="countrySelect">
+        <option value="bd">🇧🇩 BD</option>
+        <option value="us">🇺🇸 US</option>
+        <option value="id">🇮🇩 ID</option>
+        <option value="ph">🇵🇭 PH</option>
+        <option value="my">🇲🇾 MY</option>
+        <option value="pk">🇵🇰 PK</option>
+        <option value="in">🇮🇳 IN</option>
+        <option value="tr">🇹🇷 TR</option>
+        <option value="br">🇧🇷 BR</option>
+        <option value="sa">🇸🇦 SA</option>
+      </select>
+      <button class="btn btn-primary" id="lookupBtn" onclick="lookupPlayer()">Look Up</button>
+    </div>
+
+    <div id="lookupStatus" class="status"></div>
+
+    <div id="playerCard" class="player-card">
+      <div class="player-row">
+        <div>
+          <div id="playerName" class="player-name">—</div>
+          <div id="playerMeta" class="player-meta"></div>
+        </div>
+        <div id="playerIdBadge" class="player-id-badge"></div>
+      </div>
+    </div>
+  </div>
+
+  <hr class="divider" />
+
+  <!-- ── Step 2: Redeem ──────────────────────────────────── -->
+  <div class="step">
+    <div class="step-label">
+      <div class="num">2</div>
+      <span>Enter Your UC Pin Code</span>
+    </div>
+
+    <input id="pinInput" type="text" placeholder="e.g. ABCD-EFGH-1234-5678"
+           style="width:100%; margin-bottom:12px;" autocomplete="off" />
+
+    <button class="btn btn-redeem" id="redeemBtn" onclick="redeemCode()" disabled>
+      Redeem Now
+    </button>
+
+    <div id="redeemStatus" class="status"></div>
+  </div>
+
+</div>
+
+<script>
+  let verifiedPlayerId = null;
+
+  function setStatus(elId, type, html) {
+    const el = document.getElementById(elId);
+    el.className = `status show ${type}`;
+    el.innerHTML = html;
+  }
+
+  function clearStatus(elId) {
+    const el = document.getElementById(elId);
+    el.className = 'status';
+    el.innerHTML = '';
+  }
+
+  async function lookupPlayer() {
+    const playerId = document.getElementById('playerIdInput').value.trim();
+    const country  = document.getElementById('countrySelect').value;
+
+    if (!playerId) {
+      setStatus('lookupStatus', 'error', 'Please enter a Player ID.');
+      return;
+    }
+
+    const btn = document.getElementById('lookupBtn');
+    btn.disabled = true;
+    document.getElementById('playerCard').classList.remove('show');
+    document.getElementById('redeemBtn').disabled = true;
+    verifiedPlayerId = null;
+
+    setStatus('lookupStatus', 'loading',
+      '<span class="spinner"></span>Looking up player…');
+
+    try {
+      const resp = await fetch(`/api/player-info?player_id=${encodeURIComponent(playerId)}&country_code=${country}`);
+      const data = await resp.json();
+
+      if (!resp.ok || !data.success) {
+        setStatus('lookupStatus', 'error', data.detail || data.error || 'Player not found.');
+        return;
+      }
+
+      const p = data.player;
+      document.getElementById('playerName').textContent    = p.username || '(unknown)';
+      document.getElementById('playerMeta').textContent    =
+        [p.server_id && `Server ${p.server_id}`, p.zone_id && `Zone ${p.zone_id}`]
+          .filter(Boolean).join(' · ');
+      document.getElementById('playerIdBadge').textContent = `UID: ${p.player_id}`;
+      document.getElementById('playerCard').classList.add('show');
+
+      verifiedPlayerId = playerId;
+      document.getElementById('redeemBtn').disabled = false;
+      clearStatus('lookupStatus');
+
+    } catch (err) {
+      setStatus('lookupStatus', 'error', 'Network error. Please try again.');
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
+  async function redeemCode() {
+    const pinCode = document.getElementById('pinInput').value.trim();
+    const country = document.getElementById('countrySelect').value;
+
+    if (!verifiedPlayerId) {
+      setStatus('redeemStatus', 'error', 'Please look up your player first.');
+      return;
+    }
+    if (!pinCode) {
+      setStatus('redeemStatus', 'error', 'Please enter a pin code.');
+      return;
+    }
+
+    const btn = document.getElementById('redeemBtn');
+    btn.disabled = true;
+    setStatus('redeemStatus', 'loading',
+      '<span class="spinner"></span>Submitting redeem code…');
+
+    try {
+      const resp = await fetch('/api/redeem', {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({
+          player_id:    verifiedPlayerId,
+          pin_code:     pinCode,
+          country_code: country,
+        }),
+      });
+      const data = await resp.json();
+
+      if (data.success) {
+        setStatus('redeemStatus', 'success',
+          '✓ ' + (data.message || 'Redeemed successfully!'));
+        document.getElementById('pinInput').value = '';
+      } else {
+        setStatus('redeemStatus', 'error',
+          data.message || data.detail || 'Redemption failed.');
+      }
+
+    } catch (err) {
+      setStatus('redeemStatus', 'error', 'Network error. Please try again.');
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
+  // Allow Enter key on player ID input
+  document.getElementById('playerIdInput').addEventListener('keydown', e => {
+    if (e.key === 'Enter') lookupPlayer();
+  });
+
+  // Allow Enter key on pin input
+  document.getElementById('pinInput').addEventListener('keydown', e => {
+    if (e.key === 'Enter') redeemCode();
+  });
+</script>
+</body>
+</html>
