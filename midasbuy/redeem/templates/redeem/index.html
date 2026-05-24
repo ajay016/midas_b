@@ -215,6 +215,56 @@
       cursor: pointer;
     }
     select option { background: #1a1c20; }
+
+    /* ── Cookie section ───────────────────────────────────────── */
+    .cookie-section {
+      background: rgba(251,188,4,0.04);
+      border: 1px solid rgba(251,188,4,0.15);
+      border-radius: 14px;
+      padding: 16px 18px;
+      margin-bottom: 28px;
+    }
+    .cookie-section summary {
+      cursor: pointer;
+      font-size: 13px;
+      font-weight: 600;
+      color: rgba(251,188,4,0.8);
+      list-style: none;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .cookie-section summary::before { content: "▶"; font-size: 10px; transition: transform 0.2s; }
+    .cookie-section[open] summary::before { transform: rotate(90deg); }
+    .cookie-section .hint {
+      font-size: 11px;
+      color: rgba(255,255,255,0.35);
+      margin: 10px 0 8px;
+      line-height: 1.6;
+    }
+    .cookie-section .hint code {
+      background: rgba(255,255,255,0.08);
+      border-radius: 4px;
+      padding: 1px 5px;
+      font-size: 11px;
+    }
+    textarea {
+      width: 100%;
+      background: rgba(255,255,255,0.05);
+      border: 1px solid rgba(255,255,255,0.1);
+      border-radius: 10px;
+      padding: 10px 12px;
+      font-size: 11px;
+      color: rgba(255,255,255,0.6);
+      outline: none;
+      resize: vertical;
+      min-height: 64px;
+      font-family: monospace;
+    }
+    textarea:focus {
+      border-color: rgba(251,188,4,0.4);
+      box-shadow: 0 0 0 3px rgba(251,188,4,0.06);
+    }
   </style>
 </head>
 <body>
@@ -229,6 +279,18 @@
 
   <h1>Redeem Your UC Code</h1>
   <p class="subtitle">Enter your player ID to verify, then submit your pin code</p>
+
+  <!-- ── Session cookies (required for authenticated calls) ── -->
+  <details class="cookie-section" id="cookieDetails">
+    <summary>Session Cookies (required for redemption)</summary>
+    <p class="hint">
+      Midasbuy requires you to be logged in. Paste your browser cookies here.<br>
+      How to get them: open <code>midasbuy.com</code> → log in → press <code>F12</code>
+      → Network tab → reload page → click any request → Headers →
+      copy the <code>Cookie:</code> value and paste below.
+    </p>
+    <textarea id="cookieInput" placeholder="Paste your midasbuy.com Cookie header value here…" rows="3"></textarea>
+  </details>
 
   <!-- ── Step 1: Player lookup ───────────────────────────── -->
   <div class="step">
@@ -303,6 +365,17 @@
     el.innerHTML = '';
   }
 
+  function getCookies() {
+    return (document.getElementById('cookieInput').value || '').trim();
+  }
+
+  function buildHeaders(extra) {
+    const h = { ...extra };
+    const c = getCookies();
+    if (c) h['X-Midasbuy-Cookie'] = c;
+    return h;
+  }
+
   async function lookupPlayer() {
     const playerId = document.getElementById('playerIdInput').value.trim();
     const country  = document.getElementById('countrySelect').value;
@@ -322,7 +395,10 @@
       '<span class="spinner"></span>Looking up player…');
 
     try {
-      const resp = await fetch(`/api/player-info?player_id=${encodeURIComponent(playerId)}&country_code=${country}`);
+      const resp = await fetch(
+        `/api/player-info?player_id=${encodeURIComponent(playerId)}&country_code=${country}`,
+        { headers: buildHeaders({}) }
+      );
       const data = await resp.json();
 
       if (!resp.ok || !data.success) {
@@ -370,7 +446,7 @@
     try {
       const resp = await fetch('/api/redeem', {
         method:  'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: buildHeaders({ 'Content-Type': 'application/json' }),
         body:    JSON.stringify({
           player_id:    verifiedPlayerId,
           pin_code:     pinCode,
