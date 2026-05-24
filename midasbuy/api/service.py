@@ -20,6 +20,7 @@ import httpx
 from .schemas import PlayerInfo, PlayerLookupResponse, RedeemResponse
 from api.crypto.crypto import build_encrypted_payload
 from api.crypto.constants import XMIDAS_TOKEN, XMIDAS_VERSION
+from accounts.utils import get_xmidas_token_file_path, load_text_file
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +33,19 @@ _UA = (
     "AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/124.0.0.0 Safari/537.36"
 )
+
+
+def _get_xmidas_token(storage_state_path: str) -> str:
+    """Read the live xMidasToken saved during login; fall back to bundled constant."""
+    import os
+    session_dir = os.path.dirname(storage_state_path)
+    token_path  = get_xmidas_token_file_path(session_dir)
+    live_token  = load_text_file(token_path)
+    if live_token and len(live_token) >= 64:
+        logger.info("[SERVICE] using live xMidasToken from file (len=%d)", len(live_token))
+        return live_token.strip()
+    logger.warning("[SERVICE] live xMidasToken not found, using bundled constant")
+    return XMIDAS_TOKEN
 
 
 def _load_all_cookies(storage_state_path: str) -> dict:
@@ -64,7 +78,8 @@ async def _call_api(
         logger.error("[SERVICE] no cookies found in storage_state")
         return None
 
-    body = build_encrypted_payload(payload, XMIDAS_TOKEN, XMIDAS_VERSION)
+    xmidas_token = _get_xmidas_token(storage_state_path)
+    body = build_encrypted_payload(payload, xmidas_token, XMIDAS_VERSION)
 
     referer = f"https://www.midasbuy.com/midasbuy/{country_code}/redeem/pubgm"
     headers = {
@@ -75,7 +90,7 @@ async def _call_api(
         "User-Agent":    _UA,
     }
 
-    logger.info("[SERVICE] POST %s  ctoken_prefix=%s", api_url, XMIDAS_TOKEN[:20])
+    logger.info("[SERVICE] POST %s  ctoken_prefix=%s", api_url, xmidas_token[:20])
 
     try:
         async with httpx.AsyncClient(follow_redirects=True, timeout=30.0) as client:

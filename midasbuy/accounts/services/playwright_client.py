@@ -9,6 +9,7 @@ from accounts.utils import (
     get_screenshot_file_path,
     get_storage_state_file_path,
     get_token_file_path,
+    get_xmidas_token_file_path,
     save_json_file,
     save_text_file,
 )
@@ -19,12 +20,13 @@ logger = logging.getLogger(__name__)
 
 
 def run_browser_login_session(account, session_dir: str) -> dict:
-    screenshot_path = get_screenshot_file_path(session_dir, "browser_open.png")
+    screenshot_path    = get_screenshot_file_path(session_dir, "browser_open.png")
     html_snapshot_path = get_html_snapshot_file_path(session_dir, "browser_page.html")
     storage_state_path = get_storage_state_file_path(session_dir)
-    cookie_path = get_cookie_file_path(session_dir)
-    token_path = get_token_file_path(session_dir)
-    meta_path = get_meta_file_path(session_dir)
+    cookie_path        = get_cookie_file_path(session_dir)
+    token_path         = get_token_file_path(session_dir)
+    xmidas_token_path  = get_xmidas_token_file_path(session_dir)
+    meta_path          = get_meta_file_path(session_dir)
 
     base_url = getattr(
         settings,
@@ -84,38 +86,37 @@ def run_browser_login_session(account, session_dir: str) -> dict:
                 page.url,
             )
 
+            xmidas_token = ""
+
             if flow_result.success:
-                logger.info("[MIDASBUY] Login successful, visiting additional pages to ensure ctoken...")
+                logger.info("[MIDASBUY] Login successful, visiting pages to capture xMidasToken...")
 
-                additional_urls = [
+                # Visit general pages first
+                for warm_url in [
                     "https://www.midasbuy.com/midasbuy/bd",
-                    "https://www.midasbuy.com/midasbuy/bd/redeem/pubgm",
                     "https://www.midasbuy.com/midasbuy/bd/shop/pubgm",
-                ]
-
-                for additional_url in additional_urls:
+                ]:
                     try:
-                        logger.info("[MIDASBUY] Visiting: %s", additional_url)
-                        page.goto(additional_url, wait_until="domcontentloaded", timeout=30000)
-                        page.wait_for_timeout(2000)
+                        page.goto(warm_url, wait_until="domcontentloaded", timeout=30000)
+                        page.wait_for_timeout(1500)
                     except Exception as e:
-                        logger.warning("[MIDASBUY] Failed to visit %s: %s", additional_url, e)
+                        logger.warning("[MIDASBUY] Failed to visit %s: %s", warm_url, e)
 
-                page.wait_for_timeout(3000)
-
-                cookies = context.cookies()
-                ctoken_found = any(cookie.get("name") == "ctoken" for cookie in cookies)
-                if ctoken_found:
-                    logger.info("[MIDASBUY] CToken found in cookies!")
-                else:
-                    logger.warning("[MIDASBUY] CToken not found in cookies after login")
-
-                    try:
-                        ctoken_from_storage = page.evaluate("() => localStorage.getItem('ctoken')")
-                        if ctoken_from_storage:
-                            logger.info("[MIDASBUY] Found ctoken in localStorage: %s...", ctoken_from_storage[:20])
-                    except Exception:
-                        pass
+                # Visit redeem page and capture the live xMidasToken
+                redeem_url = "https://www.midasbuy.com/midasbuy/bd/redeem/pubgm"
+                try:
+                    logger.info("[MIDASBUY] Visiting redeem page to capture xMidasToken")
+                    page.goto(redeem_url, wait_until="domcontentloaded", timeout=30000)
+                    page.wait_for_function(
+                        "() => !!document.getElementById('xMidasToken')?.value",
+                        timeout=20000,
+                    )
+                    xmidas_token = page.evaluate(
+                        "document.getElementById('xMidasToken').value"
+                    )
+                    logger.info("[MIDASBUY] xMidasToken captured: %s...", xmidas_token[:20] if xmidas_token else "EMPTY")
+                except Exception as e:
+                    logger.warning("[MIDASBUY] Failed to capture xMidasToken: %s", e)
 
             page.screenshot(path=screenshot_path, full_page=True)
             logger.info("[MIDASBUY] screenshot saved path=%s", screenshot_path)
@@ -149,6 +150,9 @@ def run_browser_login_session(account, session_dir: str) -> dict:
                 save_text_file(token_path, "")
                 logger.info("[MIDASBUY] token placeholder saved path=%s", token_path)
 
+            save_text_file(xmidas_token_path, xmidas_token)
+            logger.info("[MIDASBUY] xmidas_token saved (len=%d) path=%s", len(xmidas_token), xmidas_token_path)
+
             save_json_file(meta_path, {
                 "provider": "midasbuy",
                 "base_url": base_url,
@@ -171,7 +175,9 @@ def run_browser_login_session(account, session_dir: str) -> dict:
                 "storage_state_path": storage_state_path,
                 "cookie_path": cookie_path,
                 "token_path": token_path,
+                "xmidas_token_path": xmidas_token_path,
                 "has_ctoken": ctoken_in_storage is not None,
+                "has_xmidas_token": bool(xmidas_token),
             }
 
         except PlaywrightTimeoutError as exc:
