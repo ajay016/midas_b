@@ -49,3 +49,13 @@ DATABASES = {
 STATIC_URL = "/static/"
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
+
+# Midasbuy browser settings
+MIDASBUY_BROWSER_HEADLESS = True
+MIDASBUY_BROWSER_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/120.0.0.0 Safari/537.36"
+)
+MIDASBUY_BROWSER_VIEWPORT = {"width": 1440, "height": 900}
+MIDASBUY_LOGIN_BASE_URL = "https://www.midasbuy.com/midasbuy"

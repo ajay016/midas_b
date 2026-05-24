@@ -4,7 +4,6 @@ import os
 from django.conf import settings
 from django.http import JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
-from django.utils import timezone
 from django.views.decorators.http import require_POST
 
 from .forms import MidasbuyAccountForm
@@ -39,18 +38,7 @@ def account_delete(request, pk):
 def account_login(request, pk):
     """Trigger Playwright login for this account."""
     acct = get_object_or_404(MidasbuyAccount, pk=pk)
-    result = login_account_and_persist(acct, str(settings.BASE_DIR))
-
-    if result.success:
-        acct.status = 1
-        acct.session_dir = result.session_dir
-        acct.last_login = timezone.now()
-        acct.last_error = None
-    else:
-        acct.status = 2
-        acct.last_error = result.message
-
-    acct.save()
+    result = login_account_and_persist(acct)
     return JsonResponse({"success": result.success, "message": result.message})
 
 

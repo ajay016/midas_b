@@ -1,17 +1,21 @@
-"""
-Playwright-based Midasbuy login.
-
-Saves:
-  session_dir/storage_state.json  - full browser state (cookies + localStorage)
-  session_dir/cookies.json        - flat cookie list for easy httpx use
-  session_dir/meta.json           - login metadata
-"""
-import json
-import os
-import time
-import logging
 from dataclasses import dataclass
-from pathlib import Path
+import logging
+from typing import Optional
+
+from django.conf import settings
+from django.utils import timezone
+
+from accounts.models import MidasbuyAccount, MidasbuyLoginAttempt
+from accounts.utils import (
+    ensure_clean_session_dir,
+    get_cookie_file_path,
+    get_midasbuy_session_dir,
+    get_storage_state_file_path,
+    get_token_file_path,
+    load_json_file,
+)
+from .playwright_client import run_browser_login_session
+
 
 logger = logging.getLogger(__name__)
 
@@ -20,92 +24,133 @@ logger = logging.getLogger(__name__)
 class LoginResult:
     success: bool
     message: str
-    session_dir: str = ""
+    session_dir: Optional[str] = None
+    cookie_path: Optional[str] = None
+    storage_state_path: Optional[str] = None
+    token_path: Optional[str] = None
+    screenshot_path: Optional[str] = None
+    html_snapshot_path: Optional[str] = None
+    cookie_data: Optional[list] = None
+    storage_state_data: Optional[dict] = None
 
 
-def login_account_and_persist(account, base_dir: str) -> LoginResult:
-    """
-    Log in to Midasbuy with Playwright and save the session to disk.
-    Returns a LoginResult.
-    """
-    try:
-        from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
-    except ImportError:
-        return LoginResult(False, "Playwright is not installed. Run: pip install playwright && playwright install chromium")
+def login_midasbuy_account(account: MidasbuyAccount) -> LoginResult:
+    logger.info(
+        "[MIDASBUY] login_midasbuy_account start account_id=%s email=%s",
+        account.id,
+        account.email,
+    )
 
-    session_dir = account.get_session_dir(base_dir)
-    Path(session_dir).mkdir(parents=True, exist_ok=True)
-    storage_state_path = os.path.join(session_dir, "storage_state.json")
+    session_dir = get_midasbuy_session_dir(settings.BASE_DIR, account.id)
+    logger.info("[MIDASBUY] session_dir=%s", session_dir)
 
-    try:
-        with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
-            context = browser.new_context(
-                viewport={"width": 1280, "height": 720},
-                user_agent=(
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/124.0.0.0 Safari/537.36"
-                ),
-            )
-            page = context.new_page()
+    ensure_clean_session_dir(session_dir)
+    logger.info("[MIDASBUY] session dir cleaned")
 
-            try:
-                page.goto("https://www.midasbuy.com/midasbuy/login", timeout=60_000)
-                page.wait_for_load_state("networkidle", timeout=30_000)
-                time.sleep(2)
+    browser_result = run_browser_login_session(account, session_dir)
+    logger.info("[MIDASBUY] browser_result=%s", browser_result)
 
-                # Try email + password login form
-                email_sel    = 'input[type="email"], input[name="email"], input[placeholder*="email" i]'
-                password_sel = 'input[type="password"]'
+    cookie_path = get_cookie_file_path(session_dir)
+    storage_state_path = get_storage_state_file_path(session_dir)
+    token_path = get_token_file_path(session_dir)
 
-                page.wait_for_selector(email_sel, timeout=15_000)
-                page.fill(email_sel, account.email)
-                page.fill(password_sel, account.password)
-                time.sleep(0.5)
+    logger.info(
+        "[MIDASBUY] expected files cookie=%s storage=%s token=%s",
+        cookie_path,
+        storage_state_path,
+        token_path,
+    )
 
-                # Click login / submit
-                page.keyboard.press("Enter")
+    cookie_data = load_json_file(cookie_path) or []
+    storage_state_data = load_json_file(storage_state_path) or {}
 
-                # Wait for redirect away from login page
-                page.wait_for_url(lambda u: "login" not in u, timeout=30_000)
-                time.sleep(3)
+    logger.info(
+        "[MIDASBUY] loaded cookie_count=%s storage_state_keys=%s",
+        len(cookie_data),
+        list(storage_state_data.keys()) if isinstance(storage_state_data, dict) else [],
+    )
 
-            except PWTimeout:
-                # Already on a non-login page (maybe already logged in) — continue
-                pass
+    result = LoginResult(
+        success=browser_result["success"],
+        message=browser_result["message"],
+        session_dir=session_dir,
+        cookie_path=cookie_path,
+        storage_state_path=storage_state_path,
+        token_path=token_path,
+        screenshot_path=browser_result.get("screenshot_path"),
+        html_snapshot_path=browser_result.get("html_snapshot_path"),
+        cookie_data=cookie_data,
+        storage_state_data=storage_state_data,
+    )
 
-            # Persist session
-            state = context.storage_state()
-            with open(storage_state_path, "w") as f:
-                json.dump(state, f)
+    logger.info(
+        "[MIDASBUY] login_midasbuy_account end account_id=%s success=%s message=%s",
+        account.id,
+        result.success,
+        result.message,
+    )
+    return result
 
-            # Also save a flat cookies.json (Playwright format → list of dicts)
-            cookies_path = os.path.join(session_dir, "cookies.json")
-            with open(cookies_path, "w") as f:
-                json.dump(state.get("cookies", []), f, indent=2)
 
-            # Meta
-            meta_path = os.path.join(session_dir, "meta.json")
-            with open(meta_path, "w") as f:
-                json.dump({"email": account.email, "login_time": time.time()}, f)
+def apply_login_result(account: MidasbuyAccount, result: LoginResult) -> None:
+    logger.info(
+        "[MIDASBUY] apply_login_result start account_id=%s success=%s",
+        account.id,
+        result.success,
+    )
 
-            browser.close()
+    if result.success:
+        account.status = 1
+        account.last_error = ""
+        account.last_login_at = timezone.now()
+        account.session_path = result.cookie_path
+        account.storage_state_path = result.storage_state_path
+        account.token_path = result.token_path
+        account.cookie_data = result.cookie_data or []
+        account.storage_state_data = result.storage_state_data or {}
+    else:
+        account.status = 2
+        account.last_error = result.message
 
-        # Check if session_token cookie is present (indicates login succeeded)
-        with open(storage_state_path) as f:
-            saved_state = json.load(f)
+    account.save(
+        update_fields=[
+            "status",
+            "last_error",
+            "last_login_at",
+            "session_path",
+            "storage_state_path",
+            "token_path",
+            "cookie_data",
+            "storage_state_data",
+            "updated_at",
+        ]
+    )
 
-        has_session = any(
-            c.get("name") in ("session_token", "SESSION", "auth_token")
-            for c in saved_state.get("cookies", [])
-        )
+    logger.info(
+        "[MIDASBUY] account saved account_id=%s status=%s session_path=%s",
+        account.id,
+        account.status,
+        account.session_path,
+    )
 
-        if not has_session:
-            return LoginResult(False, "Login may have failed — no session_token found. Check credentials.", session_dir)
+    MidasbuyLoginAttempt.objects.create(
+        account=account,
+        result="success" if result.success else "failed",
+        message=result.message,
+        screenshot_path=result.screenshot_path,
+        html_snapshot_path=result.html_snapshot_path,
+    )
 
-        return LoginResult(True, "Logged in successfully", session_dir)
+    logger.info("[MIDASBUY] login attempt row created account_id=%s", account.id)
 
-    except Exception as exc:
-        logger.exception("Playwright login failed for %s", account.email)
-        return LoginResult(False, str(exc), session_dir)
+
+def login_account_and_persist(account: MidasbuyAccount) -> LoginResult:
+    logger.info("[MIDASBUY] login_account_and_persist called account_id=%s", account.id)
+    result = login_midasbuy_account(account)
+    apply_login_result(account, result)
+    logger.info(
+        "[MIDASBUY] login_account_and_persist finished account_id=%s success=%s",
+        account.id,
+        result.success,
+    )
+    return result
