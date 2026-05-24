@@ -1,16 +1,24 @@
 """
-Midasbuy API service — pure Python, no Playwright needed for API calls.
+Midasbuy API service.
 
-Flow:
-  1. Load ALL cookies from storage_state.json (session auth).
-  2. Encrypt payload with Python AES port of window.xMidas (api.crypto.crypto).
-  3. POST {encrypt_msg, ctoken, ctoken_ver} via httpx with session cookies
-     and browser-like headers.
+For every call:
+  1. Playwright navigates to the redeem page (using saved storage_state),
+     calls window.xMidas({d: JSON.stringify(payload)}) to get encrypt_msg,
+     and reads ctoken from document.getElementById('xMidasToken').value.
+  2. Python loads all session cookies from storage_state.json.
+  3. httpx POSTs {encrypt_msg, ctoken, ctoken_ver} with session cookies and
+     browser-like headers (Origin, Referer, User-Agent, Accept).
 
-ctoken in the request body = the xMidas SDK token from constants.py (static SDK
-value that acts as the AES key).  It is NOT a session cookie.
-Session auth is done entirely through the Cookie header.
+Why Playwright for encrypt_msg:
+  window.xMidas is an obfuscated Tencent SDK.  Our Python AES port produced
+  a different ciphertext length (236 vs 216 chars) — the algorithm or key
+  schedule is not a simple AES-256-CBC.  The browser always gets it right.
+
+Why httpx for the HTTP call:
+  Browser-internal fetch() was getting HTTP 500 because it didn't include all
+  required headers.  httpx lets us set Origin, Referer, User-Agent explicitly.
 """
+import asyncio
 import json
 import logging
 from typing import Optional
@@ -18,9 +26,6 @@ from typing import Optional
 import httpx
 
 from .schemas import PlayerInfo, PlayerLookupResponse, RedeemResponse
-from api.crypto.crypto import build_encrypted_payload
-from api.crypto.constants import XMIDAS_TOKEN, XMIDAS_VERSION
-from accounts.utils import get_xmidas_token_file_path, load_text_file
 
 logger = logging.getLogger(__name__)
 
@@ -33,36 +38,6 @@ _UA = (
     "AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/124.0.0.0 Safari/537.36"
 )
-
-
-def _get_xmidas_token(storage_state_path: str, country_code: str = "bd") -> str:
-    """
-    Return the live xMidasToken (AES key for encrypt_msg).
-    1. Try xmidas_token.txt saved during login.
-    2. If missing, fetch live from the page via Playwright and cache it.
-    3. Fall back to bundled constant as last resort.
-    """
-    import os
-    from accounts.utils import save_text_file as _save
-
-    session_dir = os.path.dirname(storage_state_path)
-    token_path  = get_xmidas_token_file_path(session_dir)
-    live_token  = load_text_file(token_path)
-
-    if live_token and len(live_token.strip()) >= 64:
-        logger.info("[SERVICE] xMidasToken from file  prefix=%s", live_token.strip()[:20])
-        return live_token.strip()
-
-    logger.info("[SERVICE] xmidas_token.txt missing — fetching live token via Playwright")
-    from accounts.services.playwright_crypto import get_xmidas_token as _fetch
-    fetched = _fetch(storage_state_path, country_code)
-    if fetched and len(fetched) >= 64:
-        _save(token_path, fetched)
-        logger.info("[SERVICE] live xMidasToken cached  prefix=%s", fetched[:20])
-        return fetched
-
-    logger.warning("[SERVICE] falling back to bundled constant — encrypt_msg may be invalid")
-    return XMIDAS_TOKEN
 
 
 def _load_all_cookies(storage_state_path: str) -> dict:
@@ -88,15 +63,30 @@ async def _call_api(
     storage_state_path: str,
     country_code: str,
 ) -> Optional[dict]:
-    """Encrypt payload with Python AES, then POST via httpx with session cookies."""
+    """
+    1. Use Playwright to generate encrypt_msg + ctoken from the live browser.
+    2. Load session cookies from storage_state.json.
+    3. POST via httpx with cookies + encrypted body + browser headers.
+    """
+    from accounts.services.playwright_crypto import get_browser_payload
+
+    enc = await asyncio.to_thread(
+        get_browser_payload, payload, storage_state_path, country_code
+    )
+    if not enc:
+        logger.error("[SERVICE] failed to generate browser payload")
+        return None
 
     cookies = _load_all_cookies(storage_state_path)
     if not cookies:
-        logger.error("[SERVICE] no cookies found in storage_state")
+        logger.error("[SERVICE] no cookies in storage_state")
         return None
 
-    xmidas_token = _get_xmidas_token(storage_state_path, country_code)
-    body = build_encrypted_payload(payload, xmidas_token, XMIDAS_VERSION)
+    body = {
+        "encrypt_msg": enc["encrypt_msg"],
+        "ctoken":      enc["ctoken"],
+        "ctoken_ver":  enc["ctoken_ver"],
+    }
 
     referer = f"https://www.midasbuy.com/midasbuy/{country_code}/redeem/pubgm"
     headers = {
@@ -108,8 +98,8 @@ async def _call_api(
     }
 
     logger.info(
-        "[SERVICE] POST %s  token_prefix=%s  encrypt_msg_len=%d  payload_keys=%s",
-        api_url, xmidas_token[:20], len(body["encrypt_msg"]), list(payload.keys()),
+        "[SERVICE] POST %s  ctoken_prefix=%s  encrypt_msg_len=%d",
+        api_url, enc["ctoken"][:20], len(enc["encrypt_msg"]),
     )
 
     try:
@@ -119,7 +109,7 @@ async def _call_api(
         logger.info("[SERVICE] status=%s", resp.status_code)
 
         if resp.status_code != 200:
-            logger.error("[SERVICE] non-200 raw: %s", resp.text[:800])
+            logger.error("[SERVICE] non-200 body: %s", resp.text[:800])
             return None
 
         data = resp.json()
