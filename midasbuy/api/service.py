@@ -10,10 +10,11 @@ Endpoints confirmed from browser DevTools:
   Player lookup : POST /interface/getCharac
   Code info     : POST /interface/shelfProto/shelves_svr/QueryRedeemCodeInfo
 """
+import asyncio
 import httpx
 import logging
 
-from .schemas import PlayerInfo, PlayerLookupResponse, RedeemResponse
+from .schemas import PlayerInfo, PlayerLookupResponse, RedeemRequest, RedeemResponse
 
 logger = logging.getLogger(__name__)
 
@@ -39,20 +40,21 @@ def _headers(cookies: str | None) -> dict:
     return h
 
 
+async def _encrypt(payload: dict, storage_state_path: str, country_code: str) -> dict | None:
+    """Run build_encrypted_envelope in a thread pool (sync Playwright can't run in event loop)."""
+    from accounts.services.playwright_crypto import build_encrypted_envelope
+    return await asyncio.to_thread(build_encrypted_envelope, payload, storage_state_path, country_code)
+
+
 async def get_player_info(
     player_id: str,
     country_code: str = "bd",
     storage_state_path: str | None = None,
     cookies: str | None = None,
 ) -> PlayerLookupResponse:
-    """
-    Look up a PUBG Mobile player by UID.
-    Requires a valid Midasbuy session (storage_state_path from Playwright login).
-    """
     if not storage_state_path:
         return PlayerLookupResponse(success=False, error="No session. Please log in to a Midasbuy account first.")
 
-    # Build the plaintext payload that the browser would send
     raw_payload = {
         "roleId":   player_id,
         "appId":    _APPID,
@@ -61,10 +63,7 @@ async def get_player_info(
         "country":  country_code.upper(),
     }
 
-    # Encrypt via Playwright (calls window.xMidas() on the live page)
-    from accounts.services.playwright_crypto import build_encrypted_envelope
-    envelope = build_encrypted_envelope(raw_payload, storage_state_path, country_code)
-
+    envelope = await _encrypt(raw_payload, storage_state_path, country_code)
     if not envelope:
         return PlayerLookupResponse(success=False, error="Failed to generate encrypted payload. Check Midasbuy session.")
 
@@ -106,10 +105,6 @@ async def query_code_info(
     storage_state_path: str | None = None,
     cookies: str | None = None,
 ) -> RedeemResponse:
-    """
-    Query pin code info (validates the code and returns what UC it contains).
-    This mirrors the call made when the user clicks OK on the redeem page.
-    """
     if not storage_state_path:
         return RedeemResponse(success=False, message="No session.")
 
@@ -123,9 +118,7 @@ async def query_code_info(
         "channel":  "MIDASBUY_REDEEM",
     }
 
-    from accounts.services.playwright_crypto import build_encrypted_envelope
-    envelope = build_encrypted_envelope(raw_payload, storage_state_path, country_code)
-
+    envelope = await _encrypt(raw_payload, storage_state_path, country_code)
     if not envelope:
         return RedeemResponse(success=False, message="Failed to generate encrypted payload.")
 
@@ -149,7 +142,6 @@ async def query_code_info(
             raw=data,
         )
 
-    # Extract what the code contains
     products = data.get("redeem_code_info", {}).get("products", [])
     desc = ", ".join(p.get("name", "") for p in products) if products else "Unknown reward"
     return RedeemResponse(success=True, message=f"Code valid: {desc}", raw=data)
@@ -162,33 +154,25 @@ async def submit_redeem(
     storage_state_path: str | None = None,
     cookies: str | None = None,
 ) -> RedeemResponse:
-    """
-    Full redeem: query code info first, then submit for redemption.
-    """
-    # Step 1: validate code
     check = await query_code_info(player_id, pin_code, country_code, storage_state_path, cookies)
     if not check.success:
         return check
 
-    # Step 2: actual redemption payload
     raw_payload = {
-        "roleId":   player_id,
-        "appId":    _APPID,
-        "game":     "pubgm",
-        "pf":       _PF,
-        "country":  country_code.upper(),
-        "code":     pin_code,
-        "channel":  "MIDASBUY_REDEEM",
-        "channelId":"MIDASBUY_REDEEM",
+        "roleId":    player_id,
+        "appId":     _APPID,
+        "game":      "pubgm",
+        "pf":        _PF,
+        "country":   country_code.upper(),
+        "code":      pin_code,
+        "channel":   "MIDASBUY_REDEEM",
+        "channelId": "MIDASBUY_REDEEM",
     }
 
-    from accounts.services.playwright_crypto import build_encrypted_envelope
-    envelope = build_encrypted_envelope(raw_payload, storage_state_path, country_code)
-
+    envelope = await _encrypt(raw_payload, storage_state_path, country_code)
     if not envelope:
         return RedeemResponse(success=False, message="Failed to generate encrypted payload.")
 
-    # Try the submit endpoint (mirrors what Confirm does)
     url = _BASE + "/interface/shelfProto/shelves_svr/RedeemCode"
     try:
         async with httpx.AsyncClient(headers=_headers(cookies), timeout=20) as client:
