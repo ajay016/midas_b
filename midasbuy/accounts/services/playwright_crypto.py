@@ -1,19 +1,18 @@
 """
-Uses Playwright to encrypt a payload via window.xMidas AND make the API
-call FROM WITHIN the same browser session.
-
-This is required because Midasbuy validates that the ctoken, cookies, and
-browser fingerprint all come from the same context. An httpx request made
-from outside the browser will always get a 500 because the session and
-fingerprint don't match.
+Generates the encrypted payload (encrypt_msg + ctoken) needed by Midasbuy APIs.
 
 Flow:
-  1. Load stored session (storage_state) into a headless browser.
-  2. Navigate to the PUBG Mobile redeem page to load the xMidas SDK.
-  3. Generate encrypt_msg: hexResult = window.xMidas({d: JSON.stringify(payload)})
-     then base64-encode the hex bytes.
-  4. POST to the target API URL using fetch() from inside the browser.
-  5. Return the parsed JSON response.
+  1. Load stored session into headless browser.
+  2. Navigate to redeem page so the xMidas SDK loads.
+  3. Get ctoken from document.cookie (the session CSRF token — must match the
+     ctoken cookie sent in the request headers).
+  4. Generate encrypt_msg: window.xMidas({d: JSON.stringify(payload)}) returns
+     a hex string; convert hex bytes → base64.
+  5. Return {encrypt_msg, ctoken, ctoken_ver} to Python caller.
+
+The actual HTTP request is made by the Python caller using httpx with cookies
+loaded from storage_state.json.  We never make the API call from inside the
+browser — that was the old broken approach.
 """
 import json
 import logging
@@ -22,21 +21,28 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-_JS = """
-async ({payloadJson, apiUrl}) => {
+# Returns the encrypted payload values; no fetch() call here.
+_JS_ENCRYPT = """
+({payloadJson}) => {
     try {
-        // ── get ctoken from DOM ───────────────────────────────────────
-        const tokenEl   = document.getElementById('xMidasToken');
-        const versionEl = document.getElementById('xMidasVersion');
-        if (!tokenEl || !tokenEl.value) {
-            return {error: 'no_token'};
+        // ctoken in the request body MUST equal the ctoken cookie
+        // (double-submit CSRF pattern — server rejects if they differ)
+        function parseCookie(name) {
+            const v = '; ' + document.cookie;
+            const p = v.split('; ' + name + '=');
+            return p.length >= 2 ? decodeURIComponent(p.pop().split(';').shift()) : '';
         }
-        const ctoken     = tokenEl.value;
+
+        const ctoken = parseCookie('ctoken');
+        if (!ctoken) {
+            return {error: 'no_ctoken_cookie', cookies_preview: document.cookie.substring(0, 300)};
+        }
+
+        const versionEl = document.getElementById('xMidasVersion');
         const ctoken_ver = (versionEl && versionEl.value) ? versionEl.value : '1.0.1';
 
-        // ── generate encrypt_msg via window.xMidas ────────────────────
         if (typeof window.xMidas !== 'function') {
-            return {error: 'no_xmidas_function', type: typeof window.xMidas};
+            return {error: 'no_xmidas_function'};
         }
 
         const hexResult = window.xMidas({d: payloadJson});
@@ -47,49 +53,31 @@ async ({payloadJson, apiUrl}) => {
         const bytes = (hexResult.match(/../g) || []).map(h => parseInt(h, 16));
         const encrypt_msg = btoa(String.fromCharCode(...bytes));
 
-        // ── POST to Midasbuy API from inside the browser ──────────────
-        // This ensures cookies, fingerprint, and ctoken all match the
-        // same session — which an external httpx call cannot replicate.
-        const resp = await fetch(apiUrl, {
-            method:  'POST',
-            headers: {'Content-Type': 'application/json'},
-            body:    JSON.stringify({encrypt_msg, ctoken, ctoken_ver}),
-        });
-
-        const text = await resp.text();
-        let data;
-        try   { data = JSON.parse(text); }
-        catch { data = {raw_text: text.substring(0, 500)}; }
-
         return {
-            http_status: resp.status,
-            data:        data,
-            debug: {
-                ctoken_prefix:    ctoken.substring(0, 20),
-                encrypt_msg_len:  encrypt_msg.length,
-                api_url:          apiUrl,
-            },
+            ok: true,
+            ctoken,
+            ctoken_ver,
+            encrypt_msg,
         };
-
     } catch(e) {
-        return {error: 'js_exception', detail: String(e), stack: (e.stack||'').substring(0, 500)};
+        return {error: 'js_exception', detail: String(e), stack: (e.stack || '').substring(0, 500)};
     }
 }
 """
 
 
-def call_api_via_browser(
+def get_encrypted_payload(
     payload: dict,
-    api_url: str,
     storage_state_path: str,
     country_code: str = "bd",
     timeout_ms: int = 45_000,
 ) -> Optional[dict]:
     """
-    Encrypt payload via window.xMidas and POST to api_url from inside
-    the same Playwright browser session.
+    Navigate to the Midasbuy redeem page, extract ctoken from session cookies,
+    and generate encrypt_msg via window.xMidas.
 
-    Returns the parsed JSON response dict, or None on failure.
+    Returns dict with keys {encrypt_msg, ctoken, ctoken_ver}, or None on failure.
+    Does NOT make any API call — the caller uses httpx for that.
     """
     try:
         from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
@@ -131,33 +119,18 @@ def call_api_via_browser(
 
             logger.info("[CRYPTO] page loaded url=%s", page.url)
 
-            # Wait for xMidasToken to have a value
-            try:
-                page.wait_for_function(
-                    "() => !!document.getElementById('xMidasToken')?.value",
-                    timeout=timeout_ms,
-                )
-                logger.info("[CRYPTO] xMidasToken ready")
-            except PWTimeout:
-                logger.error("[CRYPTO] timeout waiting for xMidasToken")
-                _save_debug(page, session_dir, "crypto_no_token")
-                browser.close()
-                return None
-
             # Wait for window.xMidas
             try:
                 page.wait_for_function(
                     "() => typeof window.xMidas === 'function'",
-                    timeout=15_000,
+                    timeout=timeout_ms,
                 )
                 logger.info("[CRYPTO] window.xMidas ready")
             except PWTimeout:
-                logger.warning("[CRYPTO] window.xMidas not ready after 15 s — trying anyway")
+                logger.warning("[CRYPTO] window.xMidas not ready — trying anyway")
 
             payload_json = json.dumps(payload, separators=(",", ":"))
-            logger.info("[CRYPTO] calling xMidas + fetch to %s", api_url)
-
-            result = page.evaluate(_JS, {"payloadJson": payload_json, "apiUrl": api_url})
+            result = page.evaluate(_JS_ENCRYPT, {"payloadJson": payload_json})
 
             _save_debug(page, session_dir, "crypto_done")
             browser.close()
@@ -170,24 +143,20 @@ def call_api_via_browser(
                 logger.error("[CRYPTO] JS error: %s", result)
                 return None
 
-            debug = result.get("debug", {})
             logger.info(
-                "[CRYPTO] browser fetch done — http_status=%s ctoken_prefix=%s encrypt_msg_len=%s",
-                result.get("http_status"),
-                debug.get("ctoken_prefix"),
-                debug.get("encrypt_msg_len"),
+                "[CRYPTO] encrypted — ctoken_prefix=%s encrypt_msg_len=%s ctoken_ver=%s",
+                result["ctoken"][:20],
+                len(result["encrypt_msg"]),
+                result["ctoken_ver"],
             )
-
-            data = result.get("data", {})
-            if result.get("http_status") != 200:
-                logger.error("[CRYPTO] non-200 from API: status=%s data=%s", result.get("http_status"), data)
-                return None
-
-            logger.info("[CRYPTO] API response: ret=%s", data.get("ret"))
-            return data
+            return {
+                "encrypt_msg": result["encrypt_msg"],
+                "ctoken":      result["ctoken"],
+                "ctoken_ver":  result["ctoken_ver"],
+            }
 
     except Exception:
-        logger.exception("[CRYPTO] call_api_via_browser crashed")
+        logger.exception("[CRYPTO] get_encrypted_payload crashed")
         return None
 
 

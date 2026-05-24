@@ -1,19 +1,31 @@
 """
 Midasbuy API service.
 
-All Midasbuy API calls are made FROM WITHIN a Playwright browser session
-so that cookies, ctoken, and browser fingerprint are consistent.
-An external httpx request always gets HTTP 500 because the server
-validates that these three things come from the same browser context.
+Flow for every API call:
+  1. Playwright navigates to the redeem page (using saved storage_state).
+  2. JS extracts ctoken from document.cookie and generates encrypt_msg via
+     window.xMidas — returns both values to Python.
+  3. Python loads all cookies from storage_state.json into an httpx cookie jar.
+  4. httpx POST to the API with cookies + {encrypt_msg, ctoken, ctoken_ver}
+     and browser-like headers (Origin, Referer, User-Agent, Accept).
 
-Endpoints:
-  Player lookup : POST /interface/getCharac
-  Code info     : POST /interface/shelfProto/shelves_svr/QueryRedeemCodeInfo
-  Redeem        : POST /interface/shelfProto/shelves_svr/RedeemCode
+Why httpx instead of browser fetch:
+  - Browser fetch was getting 500 because the synthetic fetch() call
+    didn't include all headers the server expects.
+  - httpx lets us set every header explicitly.
+
+Why ctoken from document.cookie (not xMidasToken DOM element):
+  - The xMidasToken element holds the SDK's static encryption token, NOT
+    the session CSRF token.
+  - Midasbuy uses double-submit CSRF: body.ctoken must equal the ctoken
+    cookie sent in the Cookie header.  Using the wrong value → 500.
 """
 import asyncio
+import json
 import logging
 from typing import Optional
+
+import httpx
 
 from .schemas import PlayerInfo, PlayerLookupResponse, RedeemResponse
 
@@ -23,22 +35,83 @@ _BASE  = "https://www.midasbuy.com"
 _APPID = "1900000047"
 _PF    = "mds_pc_browser-yy-android-midasweb-midasbuy-self.midasbuy_saas"
 
+_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/124.0.0.0 Safari/537.36"
+)
 
-def _no_session() -> None:
-    pass  # placeholder so the import stays clean
+
+def _load_cookies(storage_state_path: str) -> dict:
+    """Return all midasbuy.com cookies from storage_state.json as a plain dict."""
+    try:
+        with open(storage_state_path, encoding="utf-8") as f:
+            state = json.load(f)
+        return {
+            c["name"]: c["value"]
+            for c in state.get("cookies", [])
+            if c.get("name") and c.get("value")
+            and "midasbuy.com" in c.get("domain", "")
+        }
+    except Exception as e:
+        logger.error("[SERVICE] failed to load cookies from %s: %s", storage_state_path, e)
+        return {}
 
 
-async def _browser_call(
+async def _call_api(
     payload: dict,
     api_url: str,
-    storage_state_path: Optional[str],
+    storage_state_path: str,
     country_code: str,
 ) -> Optional[dict]:
-    """Run call_api_via_browser in a thread (sync Playwright can't run in event loop)."""
-    if not storage_state_path:
+    """
+    1. Generate encrypt_msg + ctoken via Playwright (runs in a thread).
+    2. POST to api_url with httpx using session cookies.
+    """
+    from accounts.services.playwright_crypto import get_encrypted_payload
+
+    enc = await asyncio.to_thread(
+        get_encrypted_payload, payload, storage_state_path, country_code
+    )
+    if not enc:
+        logger.error("[SERVICE] failed to generate encrypted payload")
         return None
-    from accounts.services.playwright_crypto import call_api_via_browser
-    return await asyncio.to_thread(call_api_via_browser, payload, api_url, storage_state_path, country_code)
+
+    cookies = _load_cookies(storage_state_path)
+    if not cookies:
+        logger.error("[SERVICE] no cookies loaded from storage_state")
+        return None
+
+    body = {
+        "encrypt_msg": enc["encrypt_msg"],
+        "ctoken":      enc["ctoken"],
+        "ctoken_ver":  enc["ctoken_ver"],
+    }
+
+    referer = f"https://www.midasbuy.com/midasbuy/{country_code}/redeem/pubgm"
+    headers = {
+        "Content-Type": "application/json",
+        "Accept":        "application/json, text/plain, */*",
+        "Origin":        "https://www.midasbuy.com",
+        "Referer":       referer,
+        "User-Agent":    _UA,
+    }
+
+    try:
+        async with httpx.AsyncClient(follow_redirects=True, timeout=30.0) as client:
+            resp = await client.post(api_url, json=body, cookies=cookies, headers=headers)
+
+        logger.info("[SERVICE] httpx %s → status=%s", api_url, resp.status_code)
+
+        if resp.status_code != 200:
+            logger.error("[SERVICE] non-200 body: %s", resp.text[:500])
+            return None
+
+        return resp.json()
+
+    except Exception:
+        logger.exception("[SERVICE] httpx request failed")
+        return None
 
 
 async def get_player_info(
@@ -58,7 +131,7 @@ async def get_player_info(
         "country": country_code.upper(),
     }
 
-    data = await _browser_call(payload, _BASE + "/interface/getCharac", storage_state_path, country_code)
+    data = await _call_api(payload, _BASE + "/interface/getCharac", storage_state_path, country_code)
 
     if data is None:
         return PlayerLookupResponse(success=False, error="Failed to call Midasbuy API. Check session and logs.")
@@ -105,7 +178,7 @@ async def query_code_info(
     }
 
     url  = _BASE + "/interface/shelfProto/shelves_svr/QueryRedeemCodeInfo"
-    data = await _browser_call(payload, url, storage_state_path, country_code)
+    data = await _call_api(payload, url, storage_state_path, country_code)
 
     if data is None:
         return RedeemResponse(success=False, message="Failed to call Midasbuy API.")
@@ -150,7 +223,7 @@ async def submit_redeem(
     }
 
     url  = _BASE + "/interface/shelfProto/shelves_svr/RedeemCode"
-    data = await _browser_call(payload, url, storage_state_path, country_code)
+    data = await _call_api(payload, url, storage_state_path, country_code)
 
     if data is None:
         return RedeemResponse(success=False, message="Failed to call Midasbuy API.")
