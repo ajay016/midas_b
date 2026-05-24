@@ -1,18 +1,16 @@
 """
-Midasbuy API service.
+Midasbuy API service — pure Python, no Playwright needed for API calls.
 
-Flow for every API call:
-  1. Python reads all cookies (including HttpOnly ctoken) from storage_state.json.
-  2. Playwright navigates to the redeem page, runs window.xMidas({d: payload})
-     to generate encrypt_msg, and returns it to Python.
-  3. Python POSTs {encrypt_msg, ctoken, ctoken_ver} to the API via httpx,
-     with all session cookies and browser-like headers.
+Flow:
+  1. Load ALL cookies from storage_state.json (session auth).
+  2. Encrypt payload with Python AES port of window.xMidas (api.crypto.crypto).
+  3. POST {encrypt_msg, ctoken, ctoken_ver} via httpx with session cookies
+     and browser-like headers.
 
-Key insight: ctoken is an HttpOnly cookie — JavaScript cannot read it via
-document.cookie, so we must read it from storage_state.json in Python and
-pass it in the request body ourselves.
+ctoken in the request body = the xMidas SDK token from constants.py (static SDK
+value that acts as the AES key).  It is NOT a session cookie.
+Session auth is done entirely through the Cookie header.
 """
-import asyncio
 import json
 import logging
 from typing import Optional
@@ -20,6 +18,8 @@ from typing import Optional
 import httpx
 
 from .schemas import PlayerInfo, PlayerLookupResponse, RedeemResponse
+from api.crypto.crypto import build_encrypted_payload
+from api.crypto.constants import XMIDAS_TOKEN, XMIDAS_VERSION
 
 logger = logging.getLogger(__name__)
 
@@ -34,33 +34,21 @@ _UA = (
 )
 
 
-def _load_session(storage_state_path: str) -> tuple[dict, str]:
-    """
-    Returns (cookies_dict, ctoken_value) from storage_state.json.
-    cookies_dict: all midasbuy.com cookies keyed by name.
-    ctoken_value: the HttpOnly ctoken cookie value (empty string if missing).
-    """
+def _load_all_cookies(storage_state_path: str) -> dict:
+    """Load every cookie from storage_state.json — no domain filter."""
     try:
         with open(storage_state_path, encoding="utf-8") as f:
             state = json.load(f)
+        cookies = {
+            c["name"]: c["value"]
+            for c in state.get("cookies", [])
+            if c.get("name") and c.get("value")
+        }
+        logger.info("[SERVICE] loaded %d cookies from storage_state", len(cookies))
+        return cookies
     except Exception as e:
         logger.error("[SERVICE] cannot read storage_state: %s", e)
-        return {}, ""
-
-    cookies = {}
-    ctoken  = ""
-    for c in state.get("cookies", []):
-        name  = c.get("name", "")
-        value = c.get("value", "")
-        if not name or not value:
-            continue
-        if "midasbuy.com" in c.get("domain", ""):
-            cookies[name] = value
-            if name == "ctoken":
-                ctoken = value
-
-    logger.info("[SERVICE] loaded %d cookies, ctoken_found=%s", len(cookies), bool(ctoken))
-    return cookies, ctoken
+        return {}
 
 
 async def _call_api(
@@ -69,27 +57,14 @@ async def _call_api(
     storage_state_path: str,
     country_code: str,
 ) -> Optional[dict]:
-    """Generate encrypt_msg via Playwright, then POST with httpx + session cookies."""
-    from accounts.services.playwright_crypto import get_encrypt_msg
+    """Encrypt payload with Python AES, then POST via httpx with session cookies."""
 
-    # Step 1: load cookies and ctoken from storage_state
-    cookies, ctoken = _load_session(storage_state_path)
-    if not ctoken:
-        logger.error("[SERVICE] ctoken not found in storage_state — re-login required")
+    cookies = _load_all_cookies(storage_state_path)
+    if not cookies:
+        logger.error("[SERVICE] no cookies found in storage_state")
         return None
 
-    # Step 2: generate encrypt_msg (needs browser for xMidas JS function)
-    enc = await asyncio.to_thread(get_encrypt_msg, payload, storage_state_path, country_code)
-    if not enc:
-        logger.error("[SERVICE] failed to generate encrypt_msg")
-        return None
-
-    # Step 3: POST with httpx
-    body = {
-        "encrypt_msg": enc["encrypt_msg"],
-        "ctoken":      ctoken,
-        "ctoken_ver":  enc["ctoken_ver"],
-    }
+    body = build_encrypted_payload(payload, XMIDAS_TOKEN, XMIDAS_VERSION)
 
     referer = f"https://www.midasbuy.com/midasbuy/{country_code}/redeem/pubgm"
     headers = {
@@ -100,7 +75,7 @@ async def _call_api(
         "User-Agent":    _UA,
     }
 
-    logger.info("[SERVICE] POST %s ctoken_prefix=%s", api_url, ctoken[:20])
+    logger.info("[SERVICE] POST %s  ctoken_prefix=%s", api_url, XMIDAS_TOKEN[:20])
 
     try:
         async with httpx.AsyncClient(follow_redirects=True, timeout=30.0) as client:
@@ -113,7 +88,7 @@ async def _call_api(
             return None
 
         data = resp.json()
-        logger.info("[SERVICE] ret=%s", data.get("ret"))
+        logger.info("[SERVICE] ret=%s msg=%s", data.get("ret"), data.get("msg"))
         return data
 
     except Exception:
@@ -141,7 +116,7 @@ async def get_player_info(
     data = await _call_api(payload, _BASE + "/interface/getCharac", storage_state_path, country_code)
 
     if data is None:
-        return PlayerLookupResponse(success=False, error="Failed to call Midasbuy API. Check session and logs.")
+        return PlayerLookupResponse(success=False, error="Failed to call Midasbuy API. Check logs.")
 
     if data.get("ret") != 0:
         return PlayerLookupResponse(
