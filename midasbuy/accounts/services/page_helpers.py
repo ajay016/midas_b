@@ -26,27 +26,56 @@ def fill_input(page_or_frame, selector: str, value: str, timeout: int = 500) -> 
 
 def get_iframe_by_selector(page, selector: str, timeout: int = 5000):
     try:
-        frame_locator = page.frame_locator(selector)
-        # Verify the iframe is accessible by waiting for its DOM
-        frame_locator.locator("body").wait_for(state="attached", timeout=timeout)
-        # Return the underlying frame object
-        for frame in page.frames:
-            element = frame.frame_element()
-            try:
-                matches = page.locator(selector).first.evaluate(
-                    "(el, frame) => el === frame", element
-                )
-                if matches:
-                    return frame
-            except Exception:
-                continue
-        # Fallback: find frame by URL pattern or name
-        for frame in page.frames:
-            if frame != page.main_frame:
+        # Wait for the iframe element itself to appear in the DOM
+        logger.info("[PAGE_HELPERS] waiting for iframe element selector=%s", selector)
+        page.wait_for_selector(selector, state="attached", timeout=timeout)
+        logger.info("[PAGE_HELPERS] iframe element found in DOM, getting content frame")
+
+        # Use content_frame() — the correct Playwright API to get a Frame from an iframe element
+        element_handle = page.query_selector(selector)
+        if element_handle:
+            frame = element_handle.content_frame()
+            if frame:
+                logger.info("[PAGE_HELPERS] content_frame() succeeded url=%s", frame.url)
                 return frame
+            else:
+                logger.warning("[PAGE_HELPERS] content_frame() returned None — iframe may not have loaded yet")
+                # Give it a moment and retry
+                page.wait_for_timeout(1000)
+                element_handle = page.query_selector(selector)
+                if element_handle:
+                    frame = element_handle.content_frame()
+                    if frame:
+                        logger.info("[PAGE_HELPERS] content_frame() retry succeeded url=%s", frame.url)
+                        return frame
+        else:
+            logger.warning("[PAGE_HELPERS] query_selector returned None for selector=%s", selector)
+
+        # Fallback: scan all frames and return first non-main frame
+        logger.warning("[PAGE_HELPERS] falling back to frame scan, total frames=%s", len(page.frames))
+        for i, frame in enumerate(page.frames):
+            logger.info("[PAGE_HELPERS] frame[%s] url=%s name=%s", i, frame.url, frame.name)
+            if frame != page.main_frame:
+                logger.info("[PAGE_HELPERS] returning fallback frame[%s]", i)
+                return frame
+
+        logger.error("[PAGE_HELPERS] no iframe found for selector=%s", selector)
         return None
+
     except Exception as e:
-        logger.debug("[PAGE_HELPERS] get_iframe_by_selector failed selector=%s: %s", selector, e)
+        logger.error("[PAGE_HELPERS] get_iframe_by_selector exception selector=%s error=%s", selector, e)
+
+        # Still attempt fallback so we can see what frames exist
+        try:
+            logger.info("[PAGE_HELPERS] exception fallback — scanning %s frames", len(page.frames))
+            for i, frame in enumerate(page.frames):
+                logger.info("[PAGE_HELPERS] frame[%s] url=%s name=%s", i, frame.url, frame.name)
+            for frame in page.frames:
+                if frame != page.main_frame:
+                    return frame
+        except Exception:
+            pass
+
         return None
 
 
