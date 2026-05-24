@@ -60,7 +60,8 @@ _XMIDAS_JS = """
                     d: payloadJson,
                     success: function(res) {
                         cbFired = true;
-                        if (res && res.result) { finish(res.result); }
+                        if (typeof res === 'string' && res.length > 0) { finish(res); }
+                        else if (res && typeof res.result === 'string') { finish(res.result); }
                         else { resolve({error: 'cb_no_result', res: JSON.stringify(res)}); }
                     },
                     fail: function(err) {
@@ -83,7 +84,8 @@ _XMIDAS_JS = """
                     window.xMidas(
                         function(res) {
                             cbBFired = true;
-                            if (res && res.result) { finish(res.result); }
+                            if (typeof res === 'string' && res.length > 0) { finish(res); }
+                            else if (res && typeof res.result === 'string') { finish(res.result); }
                             else { resolve({error: 'cbB_no_result', res: JSON.stringify(res)}); }
                         },
                         function(err) {
@@ -98,21 +100,25 @@ _XMIDAS_JS = """
                     if (cbBFired) return;
 
                     // ── Convention C: synchronous return ──────────────────────
-                    // enc = xMidas({d: payload})  →  enc.result is hex string
+                    // xMidas({d: payload}) returns the hex string directly
+                    // OR an object with .result containing the hex string
                     let enc = null;
                     try { enc = window.xMidas({d: payloadJson}); } catch(e) {}
 
-                    if (enc && enc.result) { finish(enc.result); return; }
+                    if (typeof enc === 'string' && enc.length > 0) { finish(enc); return; }
+                    if (enc && typeof enc.result === 'string' && enc.result.length > 0) { finish(enc.result); return; }
 
                     // ── Convention D: plain string arg ────────────────────────
                     let enc2 = null;
                     try { enc2 = window.xMidas(payloadJson); } catch(e) {}
-                    if (enc2 && enc2.result) { finish(enc2.result); return; }
+                    if (typeof enc2 === 'string' && enc2.length > 0) { finish(enc2); return; }
+                    if (enc2 && typeof enc2.result === 'string') { finish(enc2.result); return; }
 
                     // ── Convention E: parsed object arg ───────────────────────
                     let enc3 = null;
                     try { enc3 = window.xMidas(JSON.parse(payloadJson)); } catch(e) {}
-                    if (enc3 && enc3.result) { finish(enc3.result); return; }
+                    if (typeof enc3 === 'string' && enc3.length > 0) { finish(enc3); return; }
+                    if (enc3 && typeof enc3.result === 'string') { finish(enc3.result); return; }
 
                     // All failed — return diagnostics
                     resolve({

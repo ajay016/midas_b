@@ -68,11 +68,14 @@ async def get_player_info(
         return PlayerLookupResponse(success=False, error="Failed to generate encrypted payload. Check Midasbuy session.")
 
     url = _BASE + "/interface/getCharac"
+    logger.info("[SERVICE] POST %s envelope_keys=%s", url, list(envelope.keys()))
     try:
         async with httpx.AsyncClient(headers=_headers(cookies), timeout=20) as client:
             resp = await client.post(url, json=envelope)
     except Exception as exc:
         return PlayerLookupResponse(success=False, error=f"Network error: {exc}")
+
+    logger.info("[SERVICE] getCharac status=%s body_preview=%s", resp.status_code, resp.text[:300])
 
     if resp.status_code != 200:
         return PlayerLookupResponse(success=False, error=f"HTTP {resp.status_code}")
