@@ -35,16 +35,33 @@ _UA = (
 )
 
 
-def _get_xmidas_token(storage_state_path: str) -> str:
-    """Read the live xMidasToken saved during login; fall back to bundled constant."""
+def _get_xmidas_token(storage_state_path: str, country_code: str = "bd") -> str:
+    """
+    Return the live xMidasToken (AES key for encrypt_msg).
+    1. Try xmidas_token.txt saved during login.
+    2. If missing, fetch live from the page via Playwright and cache it.
+    3. Fall back to bundled constant as last resort.
+    """
     import os
+    from accounts.utils import save_text_file as _save
+
     session_dir = os.path.dirname(storage_state_path)
     token_path  = get_xmidas_token_file_path(session_dir)
     live_token  = load_text_file(token_path)
-    if live_token and len(live_token) >= 64:
-        logger.info("[SERVICE] using live xMidasToken from file (len=%d)", len(live_token))
+
+    if live_token and len(live_token.strip()) >= 64:
+        logger.info("[SERVICE] xMidasToken from file  prefix=%s", live_token.strip()[:20])
         return live_token.strip()
-    logger.warning("[SERVICE] live xMidasToken not found, using bundled constant")
+
+    logger.info("[SERVICE] xmidas_token.txt missing — fetching live token via Playwright")
+    from accounts.services.playwright_crypto import get_xmidas_token as _fetch
+    fetched = _fetch(storage_state_path, country_code)
+    if fetched and len(fetched) >= 64:
+        _save(token_path, fetched)
+        logger.info("[SERVICE] live xMidasToken cached  prefix=%s", fetched[:20])
+        return fetched
+
+    logger.warning("[SERVICE] falling back to bundled constant — encrypt_msg may be invalid")
     return XMIDAS_TOKEN
 
 
@@ -78,7 +95,7 @@ async def _call_api(
         logger.error("[SERVICE] no cookies found in storage_state")
         return None
 
-    xmidas_token = _get_xmidas_token(storage_state_path)
+    xmidas_token = _get_xmidas_token(storage_state_path, country_code)
     body = build_encrypted_payload(payload, xmidas_token, XMIDAS_VERSION)
 
     referer = f"https://www.midasbuy.com/midasbuy/{country_code}/redeem/pubgm"
@@ -90,7 +107,10 @@ async def _call_api(
         "User-Agent":    _UA,
     }
 
-    logger.info("[SERVICE] POST %s  ctoken_prefix=%s", api_url, xmidas_token[:20])
+    logger.info(
+        "[SERVICE] POST %s  token_prefix=%s  encrypt_msg_len=%d  payload_keys=%s",
+        api_url, xmidas_token[:20], len(body["encrypt_msg"]), list(payload.keys()),
+    )
 
     try:
         async with httpx.AsyncClient(follow_redirects=True, timeout=30.0) as client:
@@ -99,11 +119,11 @@ async def _call_api(
         logger.info("[SERVICE] status=%s", resp.status_code)
 
         if resp.status_code != 200:
-            logger.error("[SERVICE] non-200: %s", resp.text[:500])
+            logger.error("[SERVICE] non-200 raw: %s", resp.text[:800])
             return None
 
         data = resp.json()
-        logger.info("[SERVICE] ret=%s msg=%s", data.get("ret"), data.get("msg"))
+        logger.info("[SERVICE] raw response: %s", data)
         return data
 
     except Exception:

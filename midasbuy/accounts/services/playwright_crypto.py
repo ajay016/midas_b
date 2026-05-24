@@ -38,6 +38,67 @@ _JS_ENCRYPT = """
 """
 
 
+def get_xmidas_token(
+    storage_state_path: str,
+    country_code: str = "bd",
+    timeout_ms: int = 30_000,
+) -> Optional[str]:
+    """
+    Navigate to the redeem page and return the live xMidasToken value.
+    Called automatically when xmidas_token.txt is missing from the session dir.
+    """
+    try:
+        from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
+    except ImportError:
+        logger.error("[CRYPTO] Playwright not installed")
+        return None
+
+    redeem_url = f"https://www.midasbuy.com/midasbuy/{country_code}/redeem/pubgm"
+
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(
+                headless=True,
+                args=["--no-sandbox", "--disable-dev-shm-usage"],
+            )
+            context = browser.new_context(
+                storage_state=storage_state_path,
+                viewport={"width": 1440, "height": 900},
+                user_agent=(
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/124.0.0.0 Safari/537.36"
+                ),
+            )
+            context.add_init_script(
+                "Object.defineProperty(navigator, 'webdriver', { get: () => undefined });"
+            )
+            page = context.new_page()
+
+            logger.info("[CRYPTO] fetching live xMidasToken from %s", redeem_url)
+            try:
+                page.goto(redeem_url, wait_until="domcontentloaded", timeout=timeout_ms)
+                page.wait_for_function(
+                    "() => !!document.getElementById('xMidasToken')?.value",
+                    timeout=timeout_ms,
+                )
+                token = page.evaluate("document.getElementById('xMidasToken').value")
+                browser.close()
+                if token:
+                    logger.info("[CRYPTO] live xMidasToken captured len=%d prefix=%s", len(token), token[:20])
+                    return token
+                logger.error("[CRYPTO] xMidasToken element empty")
+                return None
+            except PWTimeout:
+                logger.error("[CRYPTO] timeout waiting for xMidasToken")
+                browser.close()
+                return None
+
+    except Exception:
+        logger.exception("[CRYPTO] get_xmidas_token crashed")
+        return None
+
+
 def get_encrypt_msg(
     payload: dict,
     storage_state_path: str,
