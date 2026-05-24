@@ -220,7 +220,7 @@ def build_encrypted_envelope(
             logger.info("[CRYPTO] calling xMidas with payload_len=%s", len(payload_json))
 
             # evaluate() resolves Promises automatically in Playwright
-            result = page.evaluate(_XMIDAS_JS, payload_json, timeout=timeout_ms)
+            result = page.evaluate(_XMIDAS_JS, payload_json)
 
             _save_debug(page, session_dir, "crypto_done")
             browser.close()
