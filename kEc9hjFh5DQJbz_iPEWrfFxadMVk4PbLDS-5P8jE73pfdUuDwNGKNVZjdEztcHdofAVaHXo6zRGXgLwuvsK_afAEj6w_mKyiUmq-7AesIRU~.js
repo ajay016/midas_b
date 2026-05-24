@@ -587,3 +587,4 @@ var __TENCENT_CHAOS_STACK = (function () {
 __TENCENT_CHAOS_STACK.g = function () {
     return __TENCENT_CHAOS_STACK.shift()[0];
 };
+
