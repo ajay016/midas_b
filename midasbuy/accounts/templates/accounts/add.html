@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>Add Midasbuy Account</title>
+  <style>
+    *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+    body{min-height:100vh;background:#0a0c10;font-family:'Segoe UI',system-ui,sans-serif;color:#e8e8e8;display:flex;align-items:center;justify-content:center;padding:24px}
+    .card{width:100%;max-width:440px;background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.08);border-radius:20px;padding:36px 32px}
+    h1{font-size:20px;font-weight:700;margin-bottom:24px;background:linear-gradient(135deg,#fff 40%,#fbbc04);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text}
+    label{display:block;font-size:12px;font-weight:600;color:rgba(255,255,255,.5);margin-bottom:5px;margin-top:16px}
+    input{width:100%;background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.1);border-radius:10px;padding:11px 13px;font-size:14px;color:#fff;outline:none}
+    input:focus{border-color:rgba(251,188,4,.5);box-shadow:0 0 0 3px rgba(251,188,4,.08)}
+    .errorlist{color:#f87171;font-size:12px;margin-top:4px;list-style:none}
+    .btn{display:block;width:100%;margin-top:24px;padding:13px;background:linear-gradient(135deg,#fbbc04,#f59e0b);border:none;border-radius:12px;font-size:15px;font-weight:700;color:#0a0c10;cursor:pointer}
+    .btn:hover{filter:brightness(1.1)}
+    .back{display:block;text-align:center;margin-top:14px;font-size:13px;color:rgba(255,255,255,.35);text-decoration:none}
+    .back:hover{color:rgba(255,255,255,.6)}
+  </style>
+</head>
+<body>
+<div class="card">
+  <h1>Add Midasbuy Account</h1>
+  <form method="post">
+    {% csrf_token %}
+    {% for field in form %}
+      <label>{{ field.label }}</label>
+      {{ field }}
+      {% if field.errors %}<ul class="errorlist">{% for e in field.errors %}<li>{{ e }}</li>{% endfor %}</ul>{% endif %}
+    {% endfor %}
+    <button type="submit" class="btn">Save Account</button>
+  </form>
+  <a href="{% url 'account_list' %}" class="back">← Back to accounts</a>
+</div>
+</body>
+</html>

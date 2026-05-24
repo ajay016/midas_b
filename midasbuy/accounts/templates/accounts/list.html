@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>Midasbuy Accounts</title>
+  <style>
+    *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+    body{min-height:100vh;background:#0a0c10;font-family:'Segoe UI',system-ui,sans-serif;color:#e8e8e8;padding:32px 24px}
+    h1{font-size:22px;font-weight:700;margin-bottom:24px;background:linear-gradient(135deg,#fff 40%,#fbbc04);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text}
+    .actions{display:flex;gap:12px;margin-bottom:28px}
+    .btn{padding:10px 18px;border:none;border-radius:10px;font-size:13px;font-weight:600;cursor:pointer;transition:all .2s;text-decoration:none;display:inline-flex;align-items:center;gap:6px}
+    .btn-primary{background:linear-gradient(135deg,#fbbc04,#f59e0b);color:#0a0c10}
+    .btn-primary:hover{filter:brightness(1.1);transform:translateY(-1px)}
+    .btn-danger{background:rgba(239,68,68,.15);border:1px solid rgba(239,68,68,.3);color:#f87171}
+    .btn-success{background:rgba(34,197,94,.12);border:1px solid rgba(34,197,94,.3);color:#4ade80}
+    .btn-blue{background:rgba(59,130,246,.12);border:1px solid rgba(59,130,246,.3);color:#93c5fd}
+    .card{background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.08);border-radius:14px;padding:20px 24px;margin-bottom:14px}
+    .card-top{display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:12px}
+    .account-name{font-size:16px;font-weight:700;color:#fbbc04}
+    .account-email{font-size:13px;color:rgba(255,255,255,.5);margin-top:3px}
+    .badge{display:inline-block;padding:3px 10px;border-radius:20px;font-size:11px;font-weight:600}
+    .badge-green{background:rgba(34,197,94,.12);border:1px solid rgba(34,197,94,.3);color:#4ade80}
+    .badge-red{background:rgba(239,68,68,.12);border:1px solid rgba(239,68,68,.3);color:#f87171}
+    .badge-grey{background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.1);color:rgba(255,255,255,.4)}
+    .card-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:14px}
+    .toast{position:fixed;bottom:24px;right:24px;background:rgba(30,30,40,.95);border:1px solid rgba(255,255,255,.15);border-radius:12px;padding:14px 20px;font-size:13px;display:none;z-index:999;max-width:340px}
+    .toast.show{display:block}
+    .toast.ok{border-color:rgba(34,197,94,.4);color:#4ade80}
+    .toast.err{border-color:rgba(239,68,68,.4);color:#f87171}
+    .empty{color:rgba(255,255,255,.3);font-size:14px;margin-top:40px;text-align:center}
+  </style>
+</head>
+<body>
+  <h1>Midasbuy Accounts</h1>
+
+  <div class="actions">
+    <a href="{% url 'account_add' %}" class="btn btn-primary">+ Add Account</a>
+    <a href="/" class="btn btn-blue">← Redeem Page</a>
+  </div>
+
+  {% if accounts %}
+    {% for acct in accounts %}
+    <div class="card" id="card-{{ acct.pk }}">
+      <div class="card-top">
+        <div>
+          <div class="account-name">{{ acct.label }}</div>
+          <div class="account-email">{{ acct.email }}</div>
+        </div>
+        <span class="badge {% if acct.status == 1 %}badge-green{% elif acct.status == 2 %}badge-red{% else %}badge-grey{% endif %}">
+          {{ acct.get_status_display }}
+        </span>
+      </div>
+      {% if acct.last_error %}
+      <div style="font-size:11px;color:#f87171;margin-top:8px">{{ acct.last_error }}</div>
+      {% endif %}
+      <div class="card-actions">
+        <button class="btn btn-success" onclick="doLogin({{ acct.pk }}, this)">Login / Refresh Session</button>
+        <button class="btn btn-blue"    onclick="checkStatus({{ acct.pk }})">Check Session</button>
+        <form method="post" action="{% url 'account_delete' acct.pk %}" style="display:inline" onsubmit="return confirm('Delete this account?')">
+          {% csrf_token %}
+          <button type="submit" class="btn btn-danger">Delete</button>
+        </form>
+      </div>
+    </div>
+    {% endfor %}
+  {% else %}
+    <p class="empty">No accounts added yet. Click "Add Account" to get started.</p>
+  {% endif %}
+
+  <div class="toast" id="toast"></div>
+
+<script>
+  function showToast(msg, ok) {
+    const t = document.getElementById('toast');
+    t.className = 'toast show ' + (ok ? 'ok' : 'err');
+    t.textContent = msg;
+    setTimeout(() => t.className = 'toast', 4000);
+  }
+
+  function getCsrf() {
+    return document.cookie.split(';').map(c=>c.trim()).find(c=>c.startsWith('csrftoken='))?.split('=')[1] || '';
+  }
+
+  async function doLogin(pk, btn) {
+    btn.disabled = true;
+    btn.textContent = 'Logging in…';
+    try {
+      const r = await fetch(`/accounts/${pk}/login/`, {
+        method: 'POST',
+        headers: {'X-CSRFToken': getCsrf()}
+      });
+      const d = await r.json();
+      showToast(d.message, d.success);
+      if (d.success) setTimeout(() => location.reload(), 1500);
+    } catch(e) {
+      showToast('Network error', false);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = 'Login / Refresh Session';
+    }
+  }
+
+  async function checkStatus(pk) {
+    try {
+      const r = await fetch(`/accounts/${pk}/status/`);
+      const d = await r.json();
+      const msg = `${d.label}: session_files=${d.has_session_files}, session_token=${d.has_session_token}, status=${d.status}`;
+      showToast(msg, d.has_session_token);
+    } catch(e) {
+      showToast('Network error', false);
+    }
+  }
+</script>
+</body>
+</html>

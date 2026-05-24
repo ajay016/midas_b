@@ -1,5 +1,6 @@
 from django.urls import path, include
 
 urlpatterns = [
-    path("", include("redeem.urls")),
+    path("accounts/", include("accounts.urls")),
+    path("",          include("redeem.urls")),
 ]

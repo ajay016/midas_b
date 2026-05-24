@@ -23,7 +23,7 @@
 
     .card {
       width: 100%;
-      max-width: 480px;
+      max-width: 500px;
       background: rgba(255,255,255,0.04);
       border: 1px solid rgba(255,255,255,0.08);
       border-radius: 20px;
@@ -32,67 +32,61 @@
       box-shadow: 0 24px 64px rgba(0,0,0,0.5);
     }
 
-    .logo {
-      text-align: center;
-      margin-bottom: 32px;
-    }
+    .logo { text-align: center; margin-bottom: 28px; }
     .logo .badge {
-      display: inline-flex;
-      align-items: center;
-      gap: 10px;
-      background: rgba(251,188,4,0.1);
-      border: 1px solid rgba(251,188,4,0.25);
-      border-radius: 50px;
-      padding: 8px 18px;
+      display: inline-flex; align-items: center; gap: 10px;
+      background: rgba(251,188,4,0.1); border: 1px solid rgba(251,188,4,0.25);
+      border-radius: 50px; padding: 8px 18px;
     }
     .logo .badge svg { width: 22px; height: 22px; fill: #fbbc04; }
     .logo .badge span { font-size: 14px; font-weight: 600; color: #fbbc04; letter-spacing: 0.5px; }
 
     h1 {
-      font-size: 24px;
-      font-weight: 700;
-      text-align: center;
-      margin-bottom: 6px;
+      font-size: 24px; font-weight: 700; text-align: center; margin-bottom: 6px;
       background: linear-gradient(135deg, #fff 40%, #fbbc04);
-      -webkit-background-clip: text;
-      -webkit-text-fill-color: transparent;
-      background-clip: text;
+      -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text;
     }
-    .subtitle {
-      text-align: center;
-      font-size: 13px;
-      color: rgba(255,255,255,0.4);
-      margin-bottom: 32px;
-    }
+    .subtitle { text-align: center; font-size: 13px; color: rgba(255,255,255,0.4); margin-bottom: 28px; }
 
-    /* ── Step sections ────────────────────────────────────────── */
-    .step { margin-bottom: 28px; }
-
-    .step-label {
+    /* ── Account selector ─────────────────────────────────────── */
+    .account-bar {
+      background: rgba(251,188,4,0.06);
+      border: 1px solid rgba(251,188,4,0.2);
+      border-radius: 12px;
+      padding: 12px 16px;
+      margin-bottom: 24px;
       display: flex;
       align-items: center;
-      gap: 10px;
-      margin-bottom: 10px;
+      gap: 12px;
+      flex-wrap: wrap;
     }
+    .account-bar label { font-size: 12px; font-weight: 600; color: rgba(255,255,255,0.5); white-space: nowrap; }
+    .account-bar select { flex: 1; min-width: 160px; }
+    .account-bar .manage-link {
+      font-size: 12px; color: rgba(251,188,4,0.7); text-decoration: none; white-space: nowrap;
+    }
+    .account-bar .manage-link:hover { color: #fbbc04; }
+    .no-accounts {
+      background: rgba(239,68,68,0.08); border: 1px solid rgba(239,68,68,0.25);
+      border-radius: 10px; padding: 12px 16px; font-size: 13px; color: #f87171;
+      margin-bottom: 24px; text-align: center;
+    }
+    .no-accounts a { color: #fbbc04; text-decoration: none; }
+
+    /* ── Steps ───────────────────────────────────────────────── */
+    .step { margin-bottom: 24px; }
+    .step-label { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
     .step-label .num {
-      width: 24px; height: 24px;
-      border-radius: 50%;
-      background: rgba(251,188,4,0.15);
-      border: 1px solid rgba(251,188,4,0.4);
-      color: #fbbc04;
-      font-size: 12px;
-      font-weight: 700;
-      display: flex; align-items: center; justify-content: center;
-      flex-shrink: 0;
+      width: 24px; height: 24px; border-radius: 50%;
+      background: rgba(251,188,4,0.15); border: 1px solid rgba(251,188,4,0.4);
+      color: #fbbc04; font-size: 12px; font-weight: 700;
+      display: flex; align-items: center; justify-content: center; flex-shrink: 0;
     }
     .step-label span { font-size: 13px; font-weight: 600; color: rgba(255,255,255,0.7); }
 
-    .input-row {
-      display: flex;
-      gap: 8px;
-    }
+    .input-row { display: flex; gap: 8px; }
 
-    input[type="text"], input[type="password"] {
+    input[type="text"] {
       flex: 1;
       background: rgba(255,255,255,0.05);
       border: 1px solid rgba(255,255,255,0.1);
@@ -109,101 +103,6 @@
       box-shadow: 0 0 0 3px rgba(251,188,4,0.08);
     }
 
-    .btn {
-      padding: 12px 18px;
-      border: none;
-      border-radius: 10px;
-      font-size: 13px;
-      font-weight: 600;
-      cursor: pointer;
-      transition: all 0.2s;
-      white-space: nowrap;
-    }
-    .btn-primary {
-      background: linear-gradient(135deg, #fbbc04, #f59e0b);
-      color: #0a0c10;
-    }
-    .btn-primary:hover { filter: brightness(1.1); transform: translateY(-1px); }
-    .btn-primary:active { transform: translateY(0); }
-    .btn-primary:disabled { opacity: 0.4; cursor: not-allowed; transform: none; }
-
-    .btn-redeem {
-      width: 100%;
-      padding: 14px;
-      font-size: 15px;
-      background: linear-gradient(135deg, #f97316, #ef4444);
-      color: #fff;
-      border-radius: 12px;
-    }
-    .btn-redeem:hover { filter: brightness(1.1); transform: translateY(-1px); }
-    .btn-redeem:disabled { opacity: 0.4; cursor: not-allowed; transform: none; }
-
-    /* ── Player info card ─────────────────────────────────────── */
-    .player-card {
-      display: none;
-      background: rgba(251,188,4,0.06);
-      border: 1px solid rgba(251,188,4,0.2);
-      border-radius: 12px;
-      padding: 14px 16px;
-      margin-top: 12px;
-    }
-    .player-card.show { display: block; }
-
-    .player-row { display: flex; justify-content: space-between; align-items: center; }
-    .player-name {
-      font-size: 16px;
-      font-weight: 700;
-      color: #fbbc04;
-    }
-    .player-meta {
-      font-size: 11px;
-      color: rgba(255,255,255,0.4);
-      margin-top: 3px;
-    }
-    .player-id-badge {
-      font-size: 11px;
-      background: rgba(255,255,255,0.07);
-      border-radius: 6px;
-      padding: 4px 8px;
-      color: rgba(255,255,255,0.5);
-    }
-
-    /* ── Divider ──────────────────────────────────────────────── */
-    .divider {
-      border: none;
-      border-top: 1px solid rgba(255,255,255,0.07);
-      margin: 24px 0;
-    }
-
-    /* ── Status messages ─────────────────────────────────────── */
-    .status {
-      display: none;
-      border-radius: 10px;
-      padding: 12px 14px;
-      font-size: 13px;
-      font-weight: 500;
-      margin-top: 14px;
-      line-height: 1.5;
-    }
-    .status.show { display: block; }
-    .status.success { background: rgba(34,197,94,0.12); border: 1px solid rgba(34,197,94,0.3); color: #4ade80; }
-    .status.error   { background: rgba(239,68,68,0.12);  border: 1px solid rgba(239,68,68,0.3);  color: #f87171; }
-    .status.loading { background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1); color: rgba(255,255,255,0.5); }
-
-    /* ── Spinner ──────────────────────────────────────────────── */
-    .spinner {
-      display: inline-block;
-      width: 12px; height: 12px;
-      border: 2px solid rgba(255,255,255,0.3);
-      border-top-color: #fbbc04;
-      border-radius: 50%;
-      animation: spin 0.7s linear infinite;
-      margin-right: 6px;
-      vertical-align: middle;
-    }
-    @keyframes spin { to { transform: rotate(360deg); } }
-
-    /* ── Country selector ─────────────────────────────────────── */
     select {
       background: rgba(255,255,255,0.05);
       border: 1px solid rgba(255,255,255,0.1);
@@ -216,55 +115,62 @@
     }
     select option { background: #1a1c20; }
 
-    /* ── Cookie section ───────────────────────────────────────── */
-    .cookie-section {
-      background: rgba(251,188,4,0.04);
-      border: 1px solid rgba(251,188,4,0.15);
-      border-radius: 14px;
-      padding: 16px 18px;
-      margin-bottom: 28px;
+    .btn {
+      padding: 12px 18px; border: none; border-radius: 10px;
+      font-size: 13px; font-weight: 600; cursor: pointer;
+      transition: all 0.2s; white-space: nowrap;
     }
-    .cookie-section summary {
-      cursor: pointer;
-      font-size: 13px;
-      font-weight: 600;
-      color: rgba(251,188,4,0.8);
-      list-style: none;
-      display: flex;
-      align-items: center;
-      gap: 8px;
+    .btn-primary { background: linear-gradient(135deg, #fbbc04, #f59e0b); color: #0a0c10; }
+    .btn-primary:hover { filter: brightness(1.1); transform: translateY(-1px); }
+    .btn-primary:disabled { opacity: 0.4; cursor: not-allowed; transform: none; }
+
+    .btn-redeem {
+      width: 100%; padding: 14px; font-size: 15px;
+      background: linear-gradient(135deg, #f97316, #ef4444);
+      color: #fff; border-radius: 12px;
     }
-    .cookie-section summary::before { content: "▶"; font-size: 10px; transition: transform 0.2s; }
-    .cookie-section[open] summary::before { transform: rotate(90deg); }
-    .cookie-section .hint {
-      font-size: 11px;
-      color: rgba(255,255,255,0.35);
-      margin: 10px 0 8px;
-      line-height: 1.6;
+    .btn-redeem:hover { filter: brightness(1.1); transform: translateY(-1px); }
+    .btn-redeem:disabled { opacity: 0.4; cursor: not-allowed; transform: none; }
+
+    /* ── Player card ─────────────────────────────────────────── */
+    .player-card {
+      display: none;
+      background: rgba(251,188,4,0.06);
+      border: 1px solid rgba(251,188,4,0.2);
+      border-radius: 12px;
+      padding: 14px 16px;
+      margin-top: 12px;
     }
-    .cookie-section .hint code {
-      background: rgba(255,255,255,0.08);
-      border-radius: 4px;
-      padding: 1px 5px;
-      font-size: 11px;
+    .player-card.show { display: block; }
+    .player-row { display: flex; justify-content: space-between; align-items: center; }
+    .player-name { font-size: 16px; font-weight: 700; color: #fbbc04; }
+    .player-meta { font-size: 11px; color: rgba(255,255,255,0.4); margin-top: 3px; }
+    .player-id-badge {
+      font-size: 11px; background: rgba(255,255,255,0.07);
+      border-radius: 6px; padding: 4px 8px; color: rgba(255,255,255,0.5);
     }
-    textarea {
-      width: 100%;
-      background: rgba(255,255,255,0.05);
-      border: 1px solid rgba(255,255,255,0.1);
-      border-radius: 10px;
-      padding: 10px 12px;
-      font-size: 11px;
-      color: rgba(255,255,255,0.6);
-      outline: none;
-      resize: vertical;
-      min-height: 64px;
-      font-family: monospace;
+
+    .divider { border: none; border-top: 1px solid rgba(255,255,255,0.07); margin: 20px 0; }
+
+    /* ── Status ──────────────────────────────────────────────── */
+    .status {
+      display: none; border-radius: 10px; padding: 12px 14px;
+      font-size: 13px; font-weight: 500; margin-top: 14px; line-height: 1.5;
     }
-    textarea:focus {
-      border-color: rgba(251,188,4,0.4);
-      box-shadow: 0 0 0 3px rgba(251,188,4,0.06);
+    .status.show { display: block; }
+    .status.success { background: rgba(34,197,94,0.12); border: 1px solid rgba(34,197,94,0.3); color: #4ade80; }
+    .status.error   { background: rgba(239,68,68,0.12);  border: 1px solid rgba(239,68,68,0.3);  color: #f87171; }
+    .status.loading { background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1); color: rgba(255,255,255,0.5); }
+
+    .spinner {
+      display: inline-block; width: 12px; height: 12px;
+      border: 2px solid rgba(255,255,255,0.3); border-top-color: #fbbc04;
+      border-radius: 50%; animation: spin 0.7s linear infinite;
+      margin-right: 6px; vertical-align: middle;
     }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    .hint { font-size: 11px; color: rgba(255,255,255,0.3); margin-top: 8px; }
   </style>
 </head>
 <body>
@@ -278,19 +184,25 @@
   </div>
 
   <h1>Redeem Your UC Code</h1>
-  <p class="subtitle">Enter your player ID to verify, then submit your pin code</p>
+  <p class="subtitle">Select a logged-in account, look up your player, then redeem</p>
 
-  <!-- ── Session cookies (required for authenticated calls) ── -->
-  <details class="cookie-section" id="cookieDetails">
-    <summary>Session Cookies (required for redemption)</summary>
-    <p class="hint">
-      Midasbuy requires you to be logged in. Paste your browser cookies here.<br>
-      How to get them: open <code>midasbuy.com</code> → log in → press <code>F12</code>
-      → Network tab → reload page → click any request → Headers →
-      copy the <code>Cookie:</code> value and paste below.
-    </p>
-    <textarea id="cookieInput" placeholder="Paste your midasbuy.com Cookie header value here…" rows="3"></textarea>
-  </details>
+  <!-- ── Account selector ───────────────────────────────────── -->
+  {% if accounts %}
+  <div class="account-bar">
+    <label>Account:</label>
+    <select id="accountSelect">
+      {% for acct in accounts %}
+      <option value="{{ acct.pk }}">{{ acct.label }} ({{ acct.email }})</option>
+      {% endfor %}
+    </select>
+    <a href="/accounts/" class="manage-link">Manage →</a>
+  </div>
+  {% else %}
+  <div class="no-accounts">
+    No logged-in Midasbuy accounts found.
+    <a href="/accounts/add/">Add an account</a> and log in first.
+  </div>
+  {% endif %}
 
   <!-- ── Step 1: Player lookup ───────────────────────────── -->
   <div class="step">
@@ -313,8 +225,10 @@
         <option value="br">🇧🇷 BR</option>
         <option value="sa">🇸🇦 SA</option>
       </select>
-      <button class="btn btn-primary" id="lookupBtn" onclick="lookupPlayer()">Look Up</button>
+      <button class="btn btn-primary" id="lookupBtn" onclick="lookupPlayer()" {% if not accounts %}disabled{% endif %}>Look Up</button>
     </div>
+
+    <p class="hint">Note: Player lookup opens a headless browser — takes 5–10 seconds.</p>
 
     <div id="lookupStatus" class="status"></div>
 
@@ -345,6 +259,8 @@
       Redeem Now
     </button>
 
+    <p class="hint">Redemption also opens a headless browser to encrypt the payload — takes 5–15 seconds.</p>
+
     <div id="redeemStatus" class="status"></div>
   </div>
 
@@ -365,25 +281,18 @@
     el.innerHTML = '';
   }
 
-  function getCookies() {
-    return (document.getElementById('cookieInput').value || '').trim();
-  }
-
-  function buildHeaders(extra) {
-    const h = { ...extra };
-    const c = getCookies();
-    if (c) h['X-Midasbuy-Cookie'] = c;
-    return h;
+  function getAccountId() {
+    const sel = document.getElementById('accountSelect');
+    return sel ? sel.value : null;
   }
 
   async function lookupPlayer() {
-    const playerId = document.getElementById('playerIdInput').value.trim();
-    const country  = document.getElementById('countrySelect').value;
+    const playerId   = document.getElementById('playerIdInput').value.trim();
+    const country    = document.getElementById('countrySelect').value;
+    const accountId  = getAccountId();
 
-    if (!playerId) {
-      setStatus('lookupStatus', 'error', 'Please enter a Player ID.');
-      return;
-    }
+    if (!playerId) { setStatus('lookupStatus', 'error', 'Please enter a Player ID.'); return; }
+    if (!accountId) { setStatus('lookupStatus', 'error', 'No logged-in account selected. Add one first.'); return; }
 
     const btn = document.getElementById('lookupBtn');
     btn.disabled = true;
@@ -391,13 +300,11 @@
     document.getElementById('redeemBtn').disabled = true;
     verifiedPlayerId = null;
 
-    setStatus('lookupStatus', 'loading',
-      '<span class="spinner"></span>Looking up player…');
+    setStatus('lookupStatus', 'loading', '<span class="spinner"></span>Opening browser to look up player (5–10 s)…');
 
     try {
       const resp = await fetch(
-        `/api/player-info?player_id=${encodeURIComponent(playerId)}&country_code=${country}`,
-        { headers: buildHeaders({}) }
+        `/api/player-info?player_id=${encodeURIComponent(playerId)}&country_code=${country}&account_id=${accountId}`
       );
       const data = await resp.json();
 
@@ -409,8 +316,7 @@
       const p = data.player;
       document.getElementById('playerName').textContent    = p.username || '(unknown)';
       document.getElementById('playerMeta').textContent    =
-        [p.server_id && `Server ${p.server_id}`, p.zone_id && `Zone ${p.zone_id}`]
-          .filter(Boolean).join(' · ');
+        [p.zone_id && `Zone ${p.zone_id}`].filter(Boolean).join(' · ');
       document.getElementById('playerIdBadge').textContent = `UID: ${p.player_id}`;
       document.getElementById('playerCard').classList.add('show');
 
@@ -426,42 +332,36 @@
   }
 
   async function redeemCode() {
-    const pinCode = document.getElementById('pinInput').value.trim();
-    const country = document.getElementById('countrySelect').value;
+    const pinCode   = document.getElementById('pinInput').value.trim();
+    const country   = document.getElementById('countrySelect').value;
+    const accountId = getAccountId();
 
-    if (!verifiedPlayerId) {
-      setStatus('redeemStatus', 'error', 'Please look up your player first.');
-      return;
-    }
-    if (!pinCode) {
-      setStatus('redeemStatus', 'error', 'Please enter a pin code.');
-      return;
-    }
+    if (!verifiedPlayerId) { setStatus('redeemStatus', 'error', 'Please look up your player first.'); return; }
+    if (!pinCode)          { setStatus('redeemStatus', 'error', 'Please enter a pin code.');          return; }
+    if (!accountId)        { setStatus('redeemStatus', 'error', 'No account selected.'); return; }
 
     const btn = document.getElementById('redeemBtn');
     btn.disabled = true;
-    setStatus('redeemStatus', 'loading',
-      '<span class="spinner"></span>Submitting redeem code…');
+    setStatus('redeemStatus', 'loading', '<span class="spinner"></span>Submitting redeem code (5–15 s)…');
 
     try {
       const resp = await fetch('/api/redeem', {
         method:  'POST',
-        headers: buildHeaders({ 'Content-Type': 'application/json' }),
+        headers: { 'Content-Type': 'application/json' },
         body:    JSON.stringify({
           player_id:    verifiedPlayerId,
           pin_code:     pinCode,
           country_code: country,
+          account_id:   parseInt(accountId),
         }),
       });
       const data = await resp.json();
 
       if (data.success) {
-        setStatus('redeemStatus', 'success',
-          '✓ ' + (data.message || 'Redeemed successfully!'));
+        setStatus('redeemStatus', 'success', '✓ ' + (data.message || 'Redeemed successfully!'));
         document.getElementById('pinInput').value = '';
       } else {
-        setStatus('redeemStatus', 'error',
-          data.message || data.detail || 'Redemption failed.');
+        setStatus('redeemStatus', 'error', data.message || data.detail || 'Redemption failed.');
       }
 
     } catch (err) {
@@ -471,12 +371,9 @@
     }
   }
 
-  // Allow Enter key on player ID input
   document.getElementById('playerIdInput').addEventListener('keydown', e => {
     if (e.key === 'Enter') lookupPlayer();
   });
-
-  // Allow Enter key on pin input
   document.getElementById('pinInput').addEventListener('keydown', e => {
     if (e.key === 'Enter') redeemCode();
   });

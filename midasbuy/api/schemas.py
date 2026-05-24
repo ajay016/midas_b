@@ -10,6 +10,7 @@ class RedeemRequest(BaseModel):
     player_id:    str = Field(..., description="PUBG Mobile player UID")
     pin_code:     str = Field(..., description="UC redeem pin code")
     country_code: str = Field("bd", description="ISO country code")
+    account_id:   int | None = Field(None, description="MidasbuyAccount ID to use")
 
 
 class PlayerInfo(BaseModel):
