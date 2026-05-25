@@ -1,16 +1,14 @@
 """
-Generates the Midasbuy API request payload from inside a live browser session.
+Makes Midasbuy API calls from inside a live browser session.
 
-window.xMidas() is Tencent's obfuscated SDK — reverse-engineering it in Python
-has proven unreliable (wrong ciphertext length/format).  Instead we let the
-browser generate the correct encrypt_msg and read the real ctoken from the DOM,
-then hand both back to Python so httpx can make the actual HTTP request with
-all session cookies and proper headers.
+window.xMidas() is Tencent's Chaos VM SDK.  In headless Playwright it produces
+only ~216-char output (no fingerprint data); the real browser produces ~1456 chars
+because the SDK bundles Forter/device signals.  The server validates fingerprint
+size and returns HTTP 500 for the undersized headless output.
 
-Returned dict: {encrypt_msg, ctoken, ctoken_ver}
-  - encrypt_msg : base64 output of window.xMidas({d: JSON.stringify(payload)})
-  - ctoken      : document.getElementById('xMidasToken').value  (SDK CSRF token)
-  - ctoken_ver  : document.getElementById('xMidasVersion').value or '1.0.1'
+Fix: run the ENTIRE request cycle inside the browser page via page.evaluate().
+The browser's own window.xMidas generates the authentic fingerprinted payload,
+and fetch(credentials:'include') sends it with the real cookies + auto-headers.
 """
 import json
 import logging
@@ -19,7 +17,55 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-_JS = """
+_JS_CALL_API = """
+async ({payloadJson, endpoint, method}) => {
+    try {
+        const tokenEl = document.getElementById('xMidasToken');
+        if (!tokenEl || !tokenEl.value) {
+            return {error: 'no_xmidas_token'};
+        }
+
+        const ctoken     = tokenEl.value;
+        const versionEl  = document.getElementById('xMidasVersion');
+        const ctoken_ver = (versionEl && versionEl.value) ? versionEl.value : '1.0.1';
+
+        if (typeof window.xMidas !== 'function') {
+            return {error: 'no_xmidas_function'};
+        }
+
+        const hexResult = window.xMidas({d: payloadJson});
+        if (!hexResult || typeof hexResult !== 'string' || hexResult.length === 0) {
+            return {error: 'xmidas_empty', got: JSON.stringify(hexResult)};
+        }
+
+        const bytes       = (hexResult.match(/../g) || []).map(h => parseInt(h, 16));
+        const encrypt_msg = btoa(String.fromCharCode(...bytes));
+
+        const body = JSON.stringify({encrypt_msg, ctoken_ver, ctoken});
+        const resp = await fetch('https://www.midasbuy.com' + endpoint, {
+            method:      method || 'POST',
+            headers:     {
+                'Content-Type': 'application/json',
+                'Accept':       'application/json, text/plain, */*',
+            },
+            body:        body,
+            credentials: 'include',
+        });
+
+        const text = await resp.text();
+        let data;
+        try { data = JSON.parse(text); }
+        catch(e) { return {error: 'invalid_json', status: resp.status, text: text.substring(0, 500)}; }
+
+        return {ok: true, status: resp.status, data: data, encrypt_msg_len: encrypt_msg.length};
+    } catch(e) {
+        return {error: 'js_exception', detail: String(e), stack: (e.stack || '').substring(0, 500)};
+    }
+}
+"""
+
+# Kept for callers that only need encrypt_msg without making an HTTP call
+_JS_ENCRYPT_ONLY = """
 ({payloadJson}) => {
     try {
         const tokenEl   = document.getElementById('xMidasToken');
@@ -44,12 +90,7 @@ _JS = """
         const bytes       = (hexResult.match(/../g) || []).map(h => parseInt(h, 16));
         const encrypt_msg = btoa(String.fromCharCode(...bytes));
 
-        return {
-            ok:          true,
-            ctoken:      ctoken,
-            ctoken_ver:  ctoken_ver,
-            encrypt_msg: encrypt_msg,
-        };
+        return {ok: true, ctoken, ctoken_ver, encrypt_msg};
     } catch(e) {
         return {error: 'js_exception', detail: String(e), stack: (e.stack || '').substring(0, 500)};
     }
@@ -57,18 +98,68 @@ _JS = """
 """
 
 
-def get_browser_payload(
+def _launch_context(p, storage_state_path: str):
+    browser = p.chromium.launch(
+        headless=True,
+        args=["--no-sandbox", "--disable-dev-shm-usage"],
+    )
+    context = browser.new_context(
+        storage_state=storage_state_path,
+        viewport={"width": 1440, "height": 900},
+        user_agent=(
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/124.0.0.0 Safari/537.36"
+        ),
+    )
+    context.add_init_script(
+        "Object.defineProperty(navigator, 'webdriver', { get: () => undefined });"
+    )
+    return browser, context
+
+
+def _wait_for_xmidas(page, session_dir: str, timeout_ms: int) -> bool:
+    from playwright.sync_api import TimeoutError as PWTimeout
+
+    try:
+        page.wait_for_function(
+            "() => !!document.getElementById('xMidasToken')?.value",
+            timeout=timeout_ms,
+        )
+        logger.info("[CRYPTO] xMidasToken ready")
+    except PWTimeout:
+        logger.error("[CRYPTO] timeout waiting for xMidasToken")
+        _save_debug(page, session_dir, "crypto_no_token")
+        return False
+
+    try:
+        page.wait_for_function(
+            "() => typeof window.xMidas === 'function'",
+            timeout=15_000,
+        )
+        logger.info("[CRYPTO] window.xMidas ready")
+    except PWTimeout:
+        logger.warning("[CRYPTO] window.xMidas not ready after 15 s — trying anyway")
+
+    return True
+
+
+def call_api_in_browser(
     payload: dict,
+    endpoint: str,
     storage_state_path: str,
     country_code: str = "bd",
-    timeout_ms: int = 45_000,
+    method: str = "POST",
+    timeout_ms: int = 60_000,
 ) -> Optional[dict]:
     """
-    Navigate to the Midasbuy redeem page, call window.xMidas to encrypt the
-    payload, and read the ctoken from the xMidasToken DOM element.
+    Navigate to the Midasbuy redeem page, then execute window.xMidas AND
+    fetch() entirely inside the browser tab.
 
-    Returns {encrypt_msg, ctoken, ctoken_ver} or None on failure.
-    The actual HTTP request is made by the caller using httpx + session cookies.
+    The browser generates a full fingerprinted encrypt_msg (~1456 chars) and
+    sends the request with its real cookies + automatic sec-* headers.
+
+    Returns the parsed JSON response dict, or None on failure.
     """
     try:
         from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
@@ -81,22 +172,7 @@ def get_browser_payload(
 
     try:
         with sync_playwright() as p:
-            browser = p.chromium.launch(
-                headless=True,
-                args=["--no-sandbox", "--disable-dev-shm-usage"],
-            )
-            context = browser.new_context(
-                storage_state=storage_state_path,
-                viewport={"width": 1440, "height": 900},
-                user_agent=(
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/124.0.0.0 Safari/537.36"
-                ),
-            )
-            context.add_init_script(
-                "Object.defineProperty(navigator, 'webdriver', { get: () => undefined });"
-            )
+            browser, context = _launch_context(p, storage_state_path)
             page = context.new_page()
 
             logger.info("[CRYPTO] navigating to %s", redeem_url)
@@ -110,37 +186,94 @@ def get_browser_payload(
 
             logger.info("[CRYPTO] page loaded url=%s", page.url)
 
-            # Wait for xMidasToken to have a value
-            try:
-                page.wait_for_function(
-                    "() => !!document.getElementById('xMidasToken')?.value",
-                    timeout=timeout_ms,
-                )
-                logger.info("[CRYPTO] xMidasToken ready")
-            except PWTimeout:
-                logger.error("[CRYPTO] timeout waiting for xMidasToken")
-                _save_debug(page, session_dir, "crypto_no_token")
+            if not _wait_for_xmidas(page, session_dir, timeout_ms):
                 browser.close()
                 return None
 
-            # Wait for window.xMidas function
+            payload_json = json.dumps(payload, separators=(",", ":"))
+            logger.info(
+                "[CRYPTO] calling in-browser fetch  endpoint=%s  keys=%s",
+                endpoint,
+                list(payload.keys()),
+            )
+
+            result = page.evaluate(_JS_CALL_API, {
+                "payloadJson": payload_json,
+                "endpoint":    endpoint,
+                "method":      method,
+            })
+
+            _save_debug(page, session_dir, "crypto_done")
+            browser.close()
+
+            if not result:
+                logger.error("[CRYPTO] evaluate returned None")
+                return None
+
+            if result.get("error"):
+                logger.error("[CRYPTO] JS/fetch error: %s", result)
+                return None
+
+            logger.info(
+                "[CRYPTO] browser fetch ok  status=%s  encrypt_msg_len=%s",
+                result.get("status"),
+                result.get("encrypt_msg_len"),
+            )
+            return result.get("data")
+
+    except Exception:
+        logger.exception("[CRYPTO] call_api_in_browser crashed")
+        return None
+
+
+def get_browser_payload(
+    payload: dict,
+    storage_state_path: str,
+    country_code: str = "bd",
+    timeout_ms: int = 45_000,
+) -> Optional[dict]:
+    """
+    Navigate to the Midasbuy redeem page, call window.xMidas to encrypt the
+    payload, and read the ctoken from the xMidasToken DOM element.
+
+    Returns {encrypt_msg, ctoken, ctoken_ver, fresh_cookies} or None on failure.
+    NOTE: Use call_api_in_browser() instead when you also need to make the HTTP
+    request — the browser generates a properly fingerprinted encrypt_msg there.
+    """
+    try:
+        from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
+    except ImportError:
+        logger.error("[CRYPTO] Playwright not installed")
+        return None
+
+    redeem_url  = f"https://www.midasbuy.com/midasbuy/{country_code}/redeem/pubgm"
+    session_dir = os.path.dirname(storage_state_path)
+
+    try:
+        with sync_playwright() as p:
+            browser, context = _launch_context(p, storage_state_path)
+            page = context.new_page()
+
+            logger.info("[CRYPTO] navigating to %s", redeem_url)
             try:
-                page.wait_for_function(
-                    "() => typeof window.xMidas === 'function'",
-                    timeout=15_000,
-                )
-                logger.info("[CRYPTO] window.xMidas ready")
+                page.goto(redeem_url, wait_until="domcontentloaded", timeout=timeout_ms)
             except PWTimeout:
-                logger.warning("[CRYPTO] window.xMidas not ready after 15 s — trying anyway")
+                logger.error("[CRYPTO] page.goto timed out")
+                _save_debug(page, session_dir, "crypto_timeout")
+                browser.close()
+                return None
+
+            logger.info("[CRYPTO] page loaded url=%s", page.url)
+
+            if not _wait_for_xmidas(page, session_dir, timeout_ms):
+                browser.close()
+                return None
 
             payload_json = json.dumps(payload, separators=(",", ":"))
             logger.info("[CRYPTO] calling window.xMidas for %s", list(payload.keys()))
 
-            result = page.evaluate(_JS, {"payloadJson": payload_json})
+            result = page.evaluate(_JS_ENCRYPT_ONLY, {"payloadJson": payload_json})
 
-            # Capture cookies AFTER page load — the server rotates ctoken on each
-            # visit.  xMidasToken.value == the new ctoken cookie.  We must send
-            # the same fresh ctoken both in the request body AND Cookie header.
             fresh_cookies = {
                 c["name"]: c["value"]
                 for c in context.cookies()
