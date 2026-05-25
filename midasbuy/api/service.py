@@ -1,25 +1,34 @@
 """
 Midasbuy API service.
 
-All API calls use Python AES-256-CBC crypto (reverse-engineered from the
-obfuscated window.xMidas SDK) to produce encrypt_msg.  The live xMidasToken
-is captured once during login (saved to xmidas_token.txt) and reused here
-as the AES key.  No Playwright is needed for individual API calls.
+For every call:
+  1. Playwright navigates to the redeem page (using saved storage_state),
+     calls window.xMidas({d: JSON.stringify(payload)}) to get encrypt_msg,
+     and reads ctoken from document.getElementById('xMidasToken').value.
+  2. Python loads all session cookies from storage_state.json.
+  3. httpx sends the request with session cookies and browser-like headers.
 
-Encryption details (from midas_crypto/crypto.py):
-  Key = first 32 bytes of hex-decoded xMidasToken
-  IV  = 16 random bytes prepended to ciphertext
-  Output = base64(IV + AES-256-CBC(payload_json))
+Player lookup  → GET  /interface/queryRoleDetail   (encrypt_msg as query params)
+Code check     → POST /interface/shelfProto/shelves_svr/QueryRedeemCodeInfo
+Redeem submit  → POST /interface/shelfProto/shelves_svr/RedeemCode
+
+Why Playwright for encrypt_msg:
+  window.xMidas is an obfuscated Tencent Chaos-VM SDK.  Pure-Python AES
+  produces the right ciphertext length but the server rejects it (ret=9),
+  meaning the Chaos VM uses a non-standard key schedule or wrapping that
+  our reverse-engineering missed.  The browser always gets it right.
+
+Why httpx for the HTTP call:
+  Sending requests from inside the Playwright page (fetch/XHR) causes HTTP 500
+  because the in-page context is missing the required auth/CSRF headers.
+  httpx lets us set Origin, Referer, User-Agent, and all cookies explicitly.
 """
-import base64
+import asyncio
 import json
 import logging
-import os
 from typing import Optional
 
 import httpx
-from Crypto.Cipher import AES
-from Crypto.Util.Padding import pad
 
 from .schemas import PlayerInfo, PlayerLookupResponse, RedeemResponse
 
@@ -28,58 +37,12 @@ logger = logging.getLogger(__name__)
 _BASE    = "https://www.midasbuy.com"
 _APPID   = "1900000047"
 _PF      = "mds_pc_browser-yy-android-midasweb-midasbuy-self.midasbuy_saas"
-_VERSION = "1.0.1"
 
 _UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/124.0.0.0 Safari/537.36"
 )
-
-_HEADERS = {
-    "User-Agent":   _UA,
-    "Referer":      "https://www.midasbuy.com/",
-    "Origin":       "https://www.midasbuy.com",
-    "Content-Type": "application/json",
-    "Accept":       "application/json, text/plain, */*",
-}
-
-
-# ── Crypto ────────────────────────────────────────────────────────────────────
-
-def _xmidas_encrypt(payload: dict, ctoken_hex: str) -> str:
-    plaintext = json.dumps(payload, separators=(",", ":")).encode("utf-8")
-    padded    = pad(plaintext, AES.block_size)
-    iv        = os.urandom(16)
-    key       = bytes.fromhex(ctoken_hex)[:32]
-    cipher    = AES.new(key, AES.MODE_CBC, iv)
-    return base64.b64encode(iv + cipher.encrypt(padded)).decode("ascii")
-
-
-def _build_envelope(payload: dict, ctoken_hex: str) -> dict:
-    return {
-        "encrypt_msg": _xmidas_encrypt(payload, ctoken_hex),
-        "ctoken_ver":  _VERSION,
-        "ctoken":      ctoken_hex,
-    }
-
-
-# ── Session helpers ───────────────────────────────────────────────────────────
-
-def _load_xmidas_token(storage_state_path: str) -> Optional[str]:
-    """Read xMidasToken from xmidas_token.txt saved alongside storage_state."""
-    session_dir = os.path.dirname(storage_state_path)
-    token_path  = os.path.join(session_dir, "xmidas_token.txt")
-    try:
-        with open(token_path, encoding="utf-8") as f:
-            token = f.read().strip()
-        if token:
-            logger.info("[SERVICE] xMidasToken loaded prefix=%s", token[:20])
-            return token
-        logger.error("[SERVICE] xmidas_token.txt is empty")
-    except Exception as e:
-        logger.error("[SERVICE] cannot read xmidas_token.txt: %s", e)
-    return None
 
 
 def _load_cookies(storage_state_path: str) -> dict:
@@ -98,7 +61,78 @@ def _load_cookies(storage_state_path: str) -> dict:
         return {}
 
 
-# ── API calls ─────────────────────────────────────────────────────────────────
+async def _get_browser_envelope(
+    payload: dict,
+    storage_state_path: str,
+    country_code: str,
+) -> Optional[dict]:
+    """Run Playwright to get {encrypt_msg, ctoken, ctoken_ver} via window.xMidas."""
+    from accounts.services.playwright_crypto import get_browser_payload
+
+    enc = await asyncio.to_thread(
+        get_browser_payload, payload, storage_state_path, country_code
+    )
+    if not enc:
+        logger.error("[SERVICE] failed to generate browser payload")
+    return enc
+
+
+async def _get(
+    url: str,
+    params: dict,
+    cookies: dict,
+    referer: str,
+) -> Optional[dict]:
+    headers = {
+        "Accept":     "application/json, text/plain, */*",
+        "Origin":     "https://www.midasbuy.com",
+        "Referer":    referer,
+        "User-Agent": _UA,
+    }
+    try:
+        async with httpx.AsyncClient(follow_redirects=True, timeout=30.0) as client:
+            resp = await client.get(url, params=params, cookies=cookies, headers=headers)
+        logger.info("[SERVICE] GET %s  status=%s", url, resp.status_code)
+        if resp.status_code != 200:
+            logger.error("[SERVICE] non-200: %s", resp.text[:400])
+            return None
+        data = resp.json()
+        logger.info("[SERVICE] raw response: %s", data)
+        return data
+    except Exception:
+        logger.exception("[SERVICE] GET request failed")
+        return None
+
+
+async def _post(
+    url: str,
+    body: dict,
+    cookies: dict,
+    referer: str,
+) -> Optional[dict]:
+    headers = {
+        "Content-Type": "application/json",
+        "Accept":       "application/json, text/plain, */*",
+        "Origin":       "https://www.midasbuy.com",
+        "Referer":      referer,
+        "User-Agent":   _UA,
+    }
+    try:
+        async with httpx.AsyncClient(follow_redirects=True, timeout=30.0) as client:
+            resp = await client.post(url, json=body, cookies=cookies, headers=headers)
+        logger.info("[SERVICE] POST %s  status=%s", url, resp.status_code)
+        if resp.status_code != 200:
+            logger.error("[SERVICE] non-200: %s", resp.text[:400])
+            return None
+        data = resp.json()
+        logger.info("[SERVICE] raw response: %s", data)
+        return data
+    except Exception:
+        logger.exception("[SERVICE] POST request failed")
+        return None
+
+
+# ── Player lookup ─────────────────────────────────────────────────────────────
 
 async def get_player_info(
     player_id: str,
@@ -109,11 +143,7 @@ async def get_player_info(
     if not storage_state_path:
         return PlayerLookupResponse(success=False, error="No session. Please log in first.")
 
-    ctoken = _load_xmidas_token(storage_state_path)
-    if not ctoken:
-        return PlayerLookupResponse(success=False, error="No xMidasToken found. Please re-login.")
-
-    raw_params = {
+    payload = {
         "player_id":  player_id,
         "appid":      _APPID,
         "pf":         _PF,
@@ -121,46 +151,49 @@ async def get_player_info(
         "client_ver": "android",
     }
 
-    envelope = _build_envelope(raw_params, ctoken)
-    url      = _BASE + "/interface/queryRoleDetail"
+    enc = await _get_browser_envelope(payload, storage_state_path, country_code)
+    if not enc:
+        return PlayerLookupResponse(success=False, error="Failed to generate encrypted payload.")
 
-    logger.info("[SERVICE] GET %s  ctoken_prefix=%s", url, ctoken[:20])
+    # Sync ctoken in cookies with the freshly-generated one (double-submit CSRF)
+    session_cookies = _load_cookies(storage_state_path)
+    if enc.get("ctoken"):
+        session_cookies["ctoken"] = enc["ctoken"]
 
-    try:
-        async with httpx.AsyncClient(headers=_HEADERS, follow_redirects=True, timeout=15.0) as client:
-            resp = await client.get(url, params=envelope)
+    referer = f"{_BASE}/midasbuy/{country_code}/redeem/pubgm"
+    url     = _BASE + "/interface/queryRoleDetail"
+    params  = {
+        "encrypt_msg": enc["encrypt_msg"],
+        "ctoken":      enc["ctoken"],
+        "ctoken_ver":  enc["ctoken_ver"],
+    }
 
-        logger.info("[SERVICE] status=%s", resp.status_code)
+    logger.info("[SERVICE] GET %s  ctoken_prefix=%s", url, enc["ctoken"][:20])
+    data = await _get(url, params, session_cookies, referer)
 
-        if resp.status_code != 200:
-            logger.error("[SERVICE] non-200: %s", resp.text[:400])
-            return PlayerLookupResponse(success=False, error=f"HTTP {resp.status_code}")
+    if data is None:
+        return PlayerLookupResponse(success=False, error="API request failed. Check logs.")
 
-        data = resp.json()
-        logger.info("[SERVICE] raw response: %s", data)
-
-        if data.get("ret") != 0:
-            return PlayerLookupResponse(
-                success=False,
-                error=data.get("msg") or f"API error ret={data.get('ret')}",
-            )
-
-        role = data.get("data", {})
+    if data.get("ret") != 0:
         return PlayerLookupResponse(
-            success=True,
-            player=PlayerInfo(
-                player_id=player_id,
-                username=role.get("roleName") or role.get("role_name") or role.get("charac_name") or "",
-                role_id=str(role.get("roleId") or role.get("role_id") or role.get("openid") or player_id),
-                server_id=str(role.get("serverId") or role.get("server_id") or ""),
-                zone_id=str(role.get("zoneid") or ""),
-            ),
+            success=False,
+            error=data.get("msg") or f"API error ret={data.get('ret')}",
         )
 
-    except Exception:
-        logger.exception("[SERVICE] get_player_info failed")
-        return PlayerLookupResponse(success=False, error="Request failed. Check logs.")
+    role = data.get("data", {})
+    return PlayerLookupResponse(
+        success=True,
+        player=PlayerInfo(
+            player_id=player_id,
+            username=role.get("roleName") or role.get("role_name") or role.get("charac_name") or "",
+            role_id=str(role.get("roleId") or role.get("role_id") or role.get("openid") or player_id),
+            server_id=str(role.get("serverId") or role.get("server_id") or ""),
+            zone_id=str(role.get("zoneid") or ""),
+        ),
+    )
 
+
+# ── Redeem code info ──────────────────────────────────────────────────────────
 
 async def query_code_info(
     player_id: str,
@@ -172,13 +205,7 @@ async def query_code_info(
     if not storage_state_path:
         return RedeemResponse(success=False, message="No session.")
 
-    ctoken       = _load_xmidas_token(storage_state_path)
-    session_cookies = _load_cookies(storage_state_path)
-
-    if not ctoken:
-        return RedeemResponse(success=False, message="No xMidasToken. Please re-login.")
-
-    raw_payload = {
+    payload = {
         "roleId":  player_id,
         "appId":   _APPID,
         "game":    "pubgm",
@@ -188,42 +215,41 @@ async def query_code_info(
         "channel": "MIDASBUY_REDEEM",
     }
 
-    envelope = _build_envelope(raw_payload, ctoken)
-    url      = _BASE + "/interface/shelfProto/shelves_svr/QueryRedeemCodeInfo"
+    enc = await _get_browser_envelope(payload, storage_state_path, country_code)
+    if not enc:
+        return RedeemResponse(success=False, message="Failed to generate encrypted payload.")
 
-    logger.info("[SERVICE] POST %s  ctoken_prefix=%s", url, ctoken[:20])
+    session_cookies = _load_cookies(storage_state_path)
+    if enc.get("ctoken"):
+        session_cookies["ctoken"] = enc["ctoken"]
 
-    try:
-        async with httpx.AsyncClient(
-            headers=_HEADERS, cookies=session_cookies, follow_redirects=True, timeout=20.0
-        ) as client:
-            resp = await client.post(url, json=envelope)
+    referer = f"{_BASE}/midasbuy/{country_code}/redeem/pubgm"
+    url     = _BASE + "/interface/shelfProto/shelves_svr/QueryRedeemCodeInfo"
+    body    = {
+        "encrypt_msg": enc["encrypt_msg"],
+        "ctoken":      enc["ctoken"],
+        "ctoken_ver":  enc["ctoken_ver"],
+    }
 
-        logger.info("[SERVICE] status=%s", resp.status_code)
+    data = await _post(url, body, session_cookies, referer)
 
-        if resp.status_code != 200:
-            logger.error("[SERVICE] non-200: %s", resp.text[:400])
-            return RedeemResponse(success=False, message=f"HTTP {resp.status_code}")
+    if data is None:
+        return RedeemResponse(success=False, message="API request failed.")
 
-        data = resp.json()
-        logger.info("[SERVICE] raw response: %s", data)
+    ret = data.get("ret", -1)
+    if ret != 0:
+        return RedeemResponse(
+            success=False,
+            message=data.get("msg") or f"Code error: {data.get('err_code', 'unknown')}",
+            raw=data,
+        )
 
-        ret = data.get("ret", -1)
-        if ret != 0:
-            return RedeemResponse(
-                success=False,
-                message=data.get("msg") or f"Code error: {data.get('err_code', 'unknown')}",
-                raw=data,
-            )
+    products = data.get("redeem_code_info", {}).get("products", [])
+    desc     = ", ".join(p.get("name", "") for p in products) if products else "Unknown reward"
+    return RedeemResponse(success=True, message=f"Code valid: {desc}", raw=data)
 
-        products = data.get("redeem_code_info", {}).get("products", [])
-        desc     = ", ".join(p.get("name", "") for p in products) if products else "Unknown reward"
-        return RedeemResponse(success=True, message=f"Code valid: {desc}", raw=data)
 
-    except Exception:
-        logger.exception("[SERVICE] query_code_info failed")
-        return RedeemResponse(success=False, message="Request failed. Check logs.")
-
+# ── Redeem submit ─────────────────────────────────────────────────────────────
 
 async def submit_redeem(
     player_id: str,
@@ -236,10 +262,7 @@ async def submit_redeem(
     if not check.success:
         return check
 
-    ctoken          = _load_xmidas_token(storage_state_path)
-    session_cookies = _load_cookies(storage_state_path)
-
-    raw_payload = {
+    payload = {
         "roleId":    player_id,
         "appId":     _APPID,
         "game":      "pubgm",
@@ -250,34 +273,31 @@ async def submit_redeem(
         "channelId": "MIDASBUY_REDEEM",
     }
 
-    envelope = _build_envelope(raw_payload, ctoken)
-    url      = _BASE + "/interface/shelfProto/shelves_svr/RedeemCode"
+    enc = await _get_browser_envelope(payload, storage_state_path, country_code)
+    if not enc:
+        return RedeemResponse(success=False, message="Failed to generate encrypted payload.")
 
-    logger.info("[SERVICE] POST %s  ctoken_prefix=%s", url, ctoken[:20])
+    session_cookies = _load_cookies(storage_state_path)
+    if enc.get("ctoken"):
+        session_cookies["ctoken"] = enc["ctoken"]
 
-    try:
-        async with httpx.AsyncClient(
-            headers=_HEADERS, cookies=session_cookies, follow_redirects=True, timeout=20.0
-        ) as client:
-            resp = await client.post(url, json=envelope)
+    referer = f"{_BASE}/midasbuy/{country_code}/redeem/pubgm"
+    url     = _BASE + "/interface/shelfProto/shelves_svr/RedeemCode"
+    body    = {
+        "encrypt_msg": enc["encrypt_msg"],
+        "ctoken":      enc["ctoken"],
+        "ctoken_ver":  enc["ctoken_ver"],
+    }
 
-        logger.info("[SERVICE] status=%s", resp.status_code)
+    data = await _post(url, body, session_cookies, referer)
 
-        if resp.status_code != 200:
-            logger.error("[SERVICE] non-200: %s", resp.text[:400])
-            return RedeemResponse(success=False, message=f"HTTP {resp.status_code}")
+    if data is None:
+        return RedeemResponse(success=False, message="API request failed.")
 
-        data = resp.json()
-        logger.info("[SERVICE] raw response: %s", data)
-
-        ret = data.get("ret", -1)
-        msg = data.get("msg", "")
-        return RedeemResponse(
-            success=(ret == 0),
-            message=msg or ("Redeemed successfully!" if ret == 0 else "Redemption failed"),
-            raw=data,
-        )
-
-    except Exception:
-        logger.exception("[SERVICE] submit_redeem failed")
-        return RedeemResponse(success=False, message="Request failed. Check logs.")
+    ret = data.get("ret", -1)
+    msg = data.get("msg", "")
+    return RedeemResponse(
+        success=(ret == 0),
+        message=msg or ("Redeemed successfully!" if ret == 0 else "Redemption failed"),
+        raw=data,
+    )
