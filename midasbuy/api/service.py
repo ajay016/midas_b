@@ -144,11 +144,10 @@ async def get_player_info(
         return PlayerLookupResponse(success=False, error="No session. Please log in first.")
 
     payload = {
-        "player_id":  player_id,
-        "appid":      _APPID,
-        "pf":         _PF,
-        "country":    country_code.upper(),
-        "client_ver": "android",
+        "player_id": player_id,
+        "appid":     _APPID,
+        "pf":        _PF,
+        "country":   country_code.upper(),
     }
 
     enc = await _get_browser_envelope(payload, storage_state_path, country_code)
