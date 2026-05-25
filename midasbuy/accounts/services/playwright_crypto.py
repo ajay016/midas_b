@@ -80,18 +80,53 @@ _STEALTH_JS = """
             Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 8 });
     } catch(e) {}
 
-    // Capture window.xMidas the instant the Chaos VM assigns it.
-    // The SPA may clear window.xMidas during hydration, but our getter still
-    // returns the captured reference so page.evaluate() always sees a function.
-    try {
-        let _xMidasCapture = undefined;
-        Object.defineProperty(window, 'xMidas', {
-            get:          () => _xMidasCapture,
-            set: (fn) => { if (typeof fn === 'function') _xMidasCapture = fn; },
-            configurable: true,
-            enumerable:   true,
-        });
-    } catch(e) {}
+    // xMidas preservation ─────────────────────────────────────────────────────
+    // The Chaos VM assigns window.xMidas via Object.defineProperty (not direct
+    // assignment), so a plain setter trap is bypassed. The SPA then calls
+    // `delete window.xMidas` during hydration (confirmed: midasKeys=[]).
+    //
+    // Fix:
+    //  1. Save the real Object.defineProperty and patch the global one so we
+    //     intercept every defineProperty(window, 'xMidas', …) call.
+    //  2. When captured, reinstall our getter/setter so future clears are no-ops.
+    //  3. Poll every 200 ms; if the SPA managed to delete it, reinstall.
+    (function() {
+        let _saved = undefined;
+        const _orig = Object.defineProperty.bind(Object);
+
+        function _protect() {
+            try {
+                _orig(window, 'xMidas', {
+                    get:          () => _saved,
+                    set: (fn) => { if (typeof fn === 'function') _saved = fn; },
+                    configurable: true,
+                    enumerable:   true,
+                });
+            } catch(e) {}
+        }
+
+        // Intercept Object.defineProperty(window, 'xMidas', …)
+        Object.defineProperty = function(obj, prop, desc) {
+            if ((obj === window || obj === globalThis) &&
+                typeof prop === 'string' && prop.toLowerCase() === 'xmidas') {
+                if (typeof desc.value === 'function') _saved = desc.value;
+                _protect();
+                return window;
+            }
+            return _orig.call(Object, obj, prop, desc);
+        };
+
+        // Also catch direct assignment (window.xMidas = fn)
+        _protect();
+
+        // Reinstall every 200 ms if the SPA managed to delete the property
+        const _id = setInterval(() => {
+            if (typeof _saved === 'function' && typeof window.xMidas !== 'function') {
+                _protect();
+            }
+        }, 200);
+        setTimeout(() => clearInterval(_id), 120_000);
+    })();
 })();
 """
 
