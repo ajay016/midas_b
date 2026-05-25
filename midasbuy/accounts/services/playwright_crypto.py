@@ -15,7 +15,6 @@ WHY headed mode (headless=False):
 import json
 import logging
 import os
-import random
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -266,30 +265,6 @@ def _launch_context(p, storage_state_path: str):
     return browser, context
 
 
-def _simulate_user_behavior(page) -> None:
-    """
-    Dispatch realistic mouse/scroll events so the Forter SDK's behavioral
-    tracker collects enough data to build a valid blackbox.
-    """
-    try:
-        coords = [
-            (200 + random.randint(-30, 30), 150 + random.randint(-20, 20)),
-            (600 + random.randint(-40, 40), 350 + random.randint(-30, 30)),
-            (900 + random.randint(-30, 30), 550 + random.randint(-20, 20)),
-            (450 + random.randint(-30, 30), 280 + random.randint(-20, 20)),
-            (750 + random.randint(-30, 30), 480 + random.randint(-20, 20)),
-        ]
-        for x, y in coords:
-            page.mouse.move(x, y)
-            page.wait_for_timeout(random.randint(90, 220))
-        page.mouse.wheel(0, 150)
-        page.wait_for_timeout(200)
-        page.mouse.wheel(0, -150)
-        logger.info("[CRYPTO] user behavior simulation done")
-    except Exception as e:
-        logger.debug("[CRYPTO] behavior simulation error: %s", e)
-
-
 def _wait_for_xmidas(page, session_dir: str, timeout_ms: int) -> bool:
     from playwright.sync_api import TimeoutError as PWTimeout
 
@@ -311,34 +286,23 @@ def _wait_for_xmidas(page, session_dir: str, timeout_ms: int) -> bool:
         )
         logger.info("[CRYPTO] window.xMidas ready")
     except PWTimeout:
-        logger.warning("[CRYPTO] window.xMidas not ready after 15 s — trying anyway")
+        logger.warning("[CRYPTO] window.xMidas not ready — trying anyway")
 
-    # Simulate user behavior to give Forter's SDK real behavioral signals
-    _simulate_user_behavior(page)
-
-    # Wait for Forter SDK to write blackbox-selection into sessionStorage
+    # Log whether the injected blackbox is present
     try:
-        page.wait_for_function(
-            "() => !!window.sessionStorage.getItem('blackbox-selection')",
-            timeout=15_000,
-        )
         blen = page.evaluate(
             "() => (window.sessionStorage.getItem('blackbox-selection') || '').length"
         )
-        logger.info("[CRYPTO] Forter blackbox-selection ready  len=%d", blen)
-    except PWTimeout:
-        # Log all sessionStorage keys present for debugging
-        try:
-            ss_keys = page.evaluate(
-                "() => Object.keys(sessionStorage)"
-            )
+        if blen:
+            logger.info("[CRYPTO] blackbox-selection present  len=%d", blen)
+        else:
             logger.warning(
-                "[CRYPTO] blackbox-selection still not ready after 15 s  "
-                "sessionStorage keys=%s  (encrypt_msg WILL be small)",
-                ss_keys,
+                "[CRYPTO] blackbox-selection is empty — "
+                "create midasbuy_sessions/account_<N>/blackbox_selection.txt "
+                "with the value from Chrome DevTools → Application → Session Storage"
             )
-        except Exception:
-            logger.warning("[CRYPTO] blackbox-selection not ready and could not read sessionStorage")
+    except Exception:
+        pass
 
     return True
 
@@ -383,12 +347,6 @@ def call_api_in_browser(
                 return None
 
             logger.info("[CRYPTO] page loaded  url=%s", page.url)
-
-            # Let all async SDKs (Forter, iovation, etc.) finish initializing
-            try:
-                page.wait_for_load_state("networkidle", timeout=15_000)
-            except Exception:
-                pass  # networkidle timeout is fine, continue anyway
 
             if not _wait_for_xmidas(page, session_dir, timeout_ms):
                 browser.close()
