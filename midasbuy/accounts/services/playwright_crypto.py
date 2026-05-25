@@ -1,21 +1,22 @@
 """
 Makes Midasbuy API calls from inside a live browser session.
 
-Root cause of HTTP 500:
-  The Tencent Chaos VM reads Forter's device tokens (forterToken, feh--* keys)
-  from localStorage when encrypting.  Standard Playwright is detected as a
-  bot by Forter via CDP timing analysis, so it never writes those tokens.
-  Result: Chaos VM produces only ~216-char encrypt_msg; server rejects it.
+How encryption works (from 91.79b63beb.bundle.js + Chaos VM disassembly):
+  ctoken     = <input id="xMidasToken">.value  (96 hex chars = 48 bytes; first 32 = AES key)
+  encrypt_msg = Base64( IV_16 | AES-256-CBC( PKCS7( JSON({...publicParams, ...apiParams}) ) ) )
 
-Fix: use patchright (drop-in Playwright replacement that removes all CDP
-  detection markers).  With patchright, Forter SDK runs normally, writes
-  forterToken + feh--* to localStorage during the login session, those values
-  are saved in storage_state.json, and every subsequent call produces the
-  expected ~1456-char encrypt_msg.
+publicParams come from ei() in the bundle:
+  appid, pf, zoneid, country, device_id (from __Report_INFO),
+  muid (from __Report_INFO), tdrc_fp (= UUID cookie, NOT Forter),
+  cgi_extend (base64 of device object), drm_info (base64 of empty obj),
+  midasbuyArea, shopcode, buyType, midas_sdk, currency_type, _id (random).
 
-Install once:
-  pip install patchright
-  patchright install chromium
+The Chaos VM CDN script is intercepted via page.route and appended with a
+configurable:false property lock so React SPA hydration cannot delete
+window.xMidas.  The route must be registered BEFORE page.goto.
+
+Note: forterToken / feh-- localStorage keys are NOT read by the Chaos VM
+(confirmed by full disassembly — zero references).
 """
 import json
 import logging
@@ -23,6 +24,31 @@ import os
 from typing import Optional
 
 logger = logging.getLogger(__name__)
+
+# Local copy of the Chaos VM CDN script (served via page.route to avoid CDN latency)
+_CHAOS_VM_LOCAL_PATH = os.path.normpath(
+    os.path.join(
+        os.path.dirname(__file__), "..", "..", "..",
+        "kEc9hjFh5DQJbz_iPEWrfFxadMVk4PbLDS-5P8jE73pfdUuDwNGKNVZjdEztcHdofAVaHXo6zRGXgLwuvsK_afAEj6w_mKyiUmq-7AesIRU~.js",
+    )
+)
+
+# Appended synchronously to the Chaos VM after it executes.
+# Runs before any SPA hydration task — locks window.xMidas so React cannot delete it.
+_CHAOS_VM_PROTECTION = b"""
+;(function(){
+    var _fn = window.xMidas;
+    if (typeof _fn !== 'function') return;
+    try {
+        Object.defineProperty(window, 'xMidas', {
+            get: function() { return _fn; },
+            set: function() {},
+            configurable: false,
+            enumerable: true,
+        });
+    } catch(e) {}
+})();
+"""
 
 
 def _get_playwright():
@@ -33,15 +59,11 @@ def _get_playwright():
         return sync_playwright, PWTimeout
     except ImportError:
         from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
-        logger.warning(
-            "[CRYPTO] patchright not installed — Forter SDK will be blocked by CDP "
-            "detection and forterToken won't be written → encrypt_msg will be ~216 chars "
-            "→ server will return 500.  Fix: pip install patchright && patchright install chromium"
-        )
+        logger.warning("[CRYPTO] patchright not installed — falling back to standard playwright")
         return sync_playwright, PWTimeout
 
 
-# ── Stealth init script (belt-and-suspenders on top of patchright) ────────────
+# ── Stealth init script ────────────────────────────────────────────────────────
 _STEALTH_JS = """
 (() => {
     try { Object.defineProperty(navigator, 'webdriver', { get: () => undefined }); } catch(e) {}
@@ -79,28 +101,6 @@ _STEALTH_JS = """
         if (!navigator.hardwareConcurrency || navigator.hardwareConcurrency < 2)
             Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 8 });
     } catch(e) {}
-
-    // xMidas restoration ──────────────────────────────────────────────────────
-    // Diagnostic confirmed: readyState='interactive', midasKeys=[] when we
-    // evaluate. The Chaos VM sets window.xMidas during script loading and the
-    // SPA deletes it during hydration. The Object.defineProperty intercept did
-    // not work because the Chaos VM holds a cached reference to the native
-    // defineProperty obtained at parse time (before our init script executed).
-    //
-    // New approach: simple 50ms poll. Capture xMidas the moment it appears;
-    // restore it via direct assignment if the SPA deletes it. Works regardless
-    // of HOW the Chaos VM sets the property.
-    (function() {
-        var _saved = undefined;
-        var _id = setInterval(function() {
-            if (typeof window.xMidas === 'function') {
-                if (_saved !== window.xMidas) _saved = window.xMidas;
-            } else if (typeof _saved === 'function') {
-                try { window.xMidas = _saved; } catch(e) {}
-            }
-        }, 50);
-        setTimeout(function() { clearInterval(_id); }, 120000);
-    })();
 })();
 """
 
@@ -109,7 +109,7 @@ _STEALTH_JS = """
 _JS_CALL_API = """
 async ({payloadJson, endpoint, method}) => {
     try {
-        // xMidasToken: wait up to 15s for SPA to finish hydrating
+        // Wait for xMidasToken (up to 15s)
         let tokenWait = 0;
         while ((!document.getElementById('xMidasToken')?.value) && tokenWait < 150) {
             await new Promise(r => setTimeout(r, 100));
@@ -122,29 +122,73 @@ async ({payloadJson, endpoint, method}) => {
         const versionEl  = document.getElementById('xMidasVersion');
         const ctoken_ver = (versionEl && versionEl.value) ? versionEl.value : '1.0.1';
 
-        // xMidas: wait up to 15s for the Chaos VM script to finish loading
+        // Wait for window.xMidas (up to 15s).
+        // With the route intercept + configurable:false lock, it should be
+        // present immediately; this loop is a safety net.
         let xmWait = 0;
         while (typeof window.xMidas !== 'function' && xmWait < 150) {
             await new Promise(r => setTimeout(r, 100));
             xmWait++;
         }
-        if (typeof window.xMidas !== 'function') return {error: 'no_xmidas_function'};
+        if (typeof window.xMidas !== 'function') return {
+            error: 'no_xmidas_function',
+            midasKeys: Object.keys(window).filter(k => k.toLowerCase().includes('midas')),
+        };
 
-        // Snapshot localStorage Forter data before calling xMidas (for debugging)
-        const ftPresent  = !!localStorage.getItem('forterToken');
-        const fehCount   = Object.keys(localStorage).filter(k => k.startsWith('feh--')).length;
+        // Build publicParams — mirrors ei() in 91.79b63beb.bundle.js module 36453.
+        // server validates the full merged payload; omitting these fields causes HTTP 500.
+        const sd = window.SERVER_DATA || {};
+        const ri = window.__Report_INFO || {};
+        const rp = sd.reportParams || {};
 
-        const hexResult = window.xMidas({d: payloadJson});
+        const device_id = rp.midasbuyDeviceId || ri.midasbuyDeviceId || '';
+        const muid      = rp.midasuid        || ri.midasuid        || '';
+
+        // tdrc_fp is the UUID cookie value — NOT a Forter token
+        const uuidMatch = document.cookie.match(/UUID=([^;]*)/);
+        const tdrc_fp   = uuidMatch ? uuidMatch[1] : '';
+
+        const cgi_extend_obj = {device_id, pagetoken: '', tdrc_fp, muid};
+        const cgi_extend     = btoa(JSON.stringify(cgi_extend_obj));
+        const drm_info       = btoa(JSON.stringify({}));
+
+        const publicParams = {
+            appid:         sd.appid || '1900000047',
+            pf:            'mds_pc_browser-yy-android-midasweb-midasbuy-self.midasbuy_saas',
+            zoneid:        String(sd.zoneid || sd.zone_id || '1'),
+            country:       (sd.country || 'BD').toUpperCase(),
+            device_id,
+            pagetoken:     '',
+            tdrc_fp,
+            muid,
+            cgi_extend,
+            drm_info,
+            midasbuyArea:  sd.midasbuyArea  || '',
+            shopcode:      '',
+            buyType:       '',
+            midas_sdk:     '1',
+            currency_type: sd.currency_type || 'USD',
+            _id:           Math.random(),
+            sc:            '',
+            from:          '',
+            task_token:    '',
+        };
+
+        // Merge: actualPayload fields win over publicParams on overlap (e.g. country, appid)
+        const actualPayload = JSON.parse(payloadJson);
+        const fullPayload   = Object.assign({}, publicParams, actualPayload);
+        const fullJson      = JSON.stringify(fullPayload);
+
+        const hexResult = window.xMidas({d: fullJson});
         if (!hexResult || typeof hexResult !== 'string' || hexResult.length === 0)
             return {error: 'xmidas_empty', got: JSON.stringify(hexResult)};
 
         const bytes       = (hexResult.match(/../g) || []).map(h => parseInt(h, 16));
         const encrypt_msg = btoa(String.fromCharCode(...bytes));
-        const enc_len     = encrypt_msg.length;
 
         const resp = await fetch('https://www.midasbuy.com' + endpoint, {
             method:      method || 'POST',
-            headers:     { 'Content-Type': 'application/json', 'Accept': 'application/json, text/plain, */*' },
+            headers:     {'Content-Type': 'application/json', 'Accept': 'application/json, text/plain, */*'},
             body:        JSON.stringify({encrypt_msg, ctoken_ver, ctoken}),
             credentials: 'include',
         });
@@ -153,16 +197,10 @@ async ({payloadJson, endpoint, method}) => {
         let data;
         try { data = JSON.parse(text); }
         catch(e) {
-            const hdrs = {};
-            for (const [k,v] of resp.headers.entries()) hdrs[k] = v;
             return {error: 'invalid_json', status: resp.status,
-                    encrypt_msg_len: enc_len,
-                    forter_token_present: ftPresent, feh_count: fehCount,
-                    response_headers: hdrs, text: text.substring(0, 300)};
+                    encrypt_msg_len: encrypt_msg.length, text: text.substring(0, 300)};
         }
-        return {ok: true, status: resp.status, data,
-                encrypt_msg_len: enc_len,
-                forter_token_present: ftPresent, feh_count: fehCount};
+        return {ok: true, status: resp.status, data, encrypt_msg_len: encrypt_msg.length};
     } catch(e) {
         return {error: 'js_exception', detail: String(e), stack: (e.stack||'').substring(0,500)};
     }
@@ -191,7 +229,33 @@ async ({payloadJson}) => {
         }
         if (typeof window.xMidas !== 'function') return {error: 'no_xmidas_function'};
 
-        const hexResult = window.xMidas({d: payloadJson});
+        const sd = window.SERVER_DATA || {};
+        const ri = window.__Report_INFO || {};
+        const rp = sd.reportParams || {};
+
+        const device_id = rp.midasbuyDeviceId || ri.midasbuyDeviceId || '';
+        const muid      = rp.midasuid        || ri.midasuid        || '';
+        const uuidMatch = document.cookie.match(/UUID=([^;]*)/);
+        const tdrc_fp   = uuidMatch ? uuidMatch[1] : '';
+
+        const publicParams = {
+            appid: sd.appid || '1900000047',
+            pf: 'mds_pc_browser-yy-android-midasweb-midasbuy-self.midasbuy_saas',
+            zoneid: String(sd.zoneid || sd.zone_id || '1'),
+            country: (sd.country || 'BD').toUpperCase(),
+            device_id, pagetoken: '', tdrc_fp, muid,
+            cgi_extend: btoa(JSON.stringify({device_id, pagetoken: '', tdrc_fp, muid})),
+            drm_info: btoa(JSON.stringify({})),
+            midasbuyArea: sd.midasbuyArea || '',
+            shopcode: '', buyType: '',
+            midas_sdk: '1', currency_type: sd.currency_type || 'USD',
+            _id: Math.random(), sc: '', from: '', task_token: '',
+        };
+
+        const actualPayload = JSON.parse(payloadJson);
+        const fullJson      = JSON.stringify(Object.assign({}, publicParams, actualPayload));
+
+        const hexResult = window.xMidas({d: fullJson});
         if (!hexResult || typeof hexResult !== 'string' || hexResult.length === 0)
             return {error: 'xmidas_empty'};
 
@@ -207,6 +271,48 @@ async ({payloadJson}) => {
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
+def _setup_chaos_vm_protection(page) -> None:
+    """
+    Register a page.route intercept for the Chaos VM CDN URL BEFORE page.goto.
+
+    Serves the local JS file (or fetches from CDN as fallback) with
+    _CHAOS_VM_PROTECTION appended.  The protection runs synchronously during
+    script execution — before any React hydration task — so window.xMidas
+    is locked with configurable:false and can never be deleted by the SPA.
+    """
+    def handle_route(route):
+        try:
+            with open(_CHAOS_VM_LOCAL_PATH, "rb") as f:
+                original = f.read()
+            route.fulfill(
+                status=200,
+                headers={
+                    "content-type": "application/javascript; charset=utf-8",
+                    "cache-control": "no-cache",
+                },
+                body=original + _CHAOS_VM_PROTECTION,
+            )
+            logger.info(
+                "[CRYPTO] chaos VM served from local file + protection (%d bytes total)",
+                len(original) + len(_CHAOS_VM_PROTECTION),
+            )
+        except Exception as e:
+            logger.warning("[CRYPTO] local chaos VM unavailable (%s) — fetching from CDN", e)
+            try:
+                response = route.fetch()
+                body = response.body() + _CHAOS_VM_PROTECTION
+                hdrs = dict(response.headers)
+                hdrs.pop("content-length", None)
+                route.fulfill(status=response.status, headers=hdrs, body=body)
+                logger.info("[CRYPTO] chaos VM fetched from CDN + protection appended")
+            except Exception as e2:
+                logger.error("[CRYPTO] CDN fetch also failed (%s) — no protection", e2)
+                route.continue_()
+
+    page.route("**cdn.midasbuy.com/js/x-midas/**", handle_route)
+    logger.info("[CRYPTO] chaos VM route intercept registered")
+
+
 def _load_session_storage(storage_state_path: str) -> dict:
     ss_path = os.path.join(os.path.dirname(storage_state_path), "session_storage.json")
     if not os.path.exists(ss_path):
@@ -221,36 +327,8 @@ def _load_session_storage(storage_state_path: str) -> dict:
         return {}
 
 
-def _log_storage_state_locals(storage_state_path: str) -> None:
-    """Log localStorage contents from storage_state to verify Forter data is present."""
-    try:
-        with open(storage_state_path, encoding="utf-8") as f:
-            ss = json.load(f)
-        for origin in ss.get("origins", []):
-            ls_items = origin.get("localStorage", [])
-            if not ls_items:
-                continue
-            keys = [item["name"] for item in ls_items]
-            forter_keys = [k for k in keys if k.startswith("feh--") or k == "forterToken"]
-            logger.info(
-                "[CRYPTO] storage_state localStorage  origin=%s  total=%d  forter_keys=%s",
-                origin.get("origin"), len(ls_items), forter_keys,
-            )
-        if not any(o.get("localStorage") for o in ss.get("origins", [])):
-            logger.warning(
-                "[CRYPTO] storage_state has NO localStorage data — "
-                "Forter SDK did not run during login. "
-                "Install patchright so it writes forterToken during login: "
-                "pip install patchright && patchright install chromium"
-            )
-    except Exception as e:
-        logger.debug("[CRYPTO] could not inspect storage_state: %s", e)
-
-
 def _launch_context(p, storage_state_path: str):
-    """Launch headless browser. With patchright, Forter SDK runs undetected."""
     ss_data = _load_session_storage(storage_state_path)
-    _log_storage_state_locals(storage_state_path)
 
     browser = p.chromium.launch(
         headless=True,
@@ -308,56 +386,22 @@ def _wait_for_xmidas(page, session_dir: str, timeout_ms: int) -> bool:
             timeout=30_000,
         )
         logger.info("[CRYPTO] window.xMidas ready")
-        # xMidas is alive RIGHT NOW in the main world — lock it before SPA deletes it.
-        # add_init_script runs in patchright's isolated world; page.evaluate runs in
-        # the MAIN world (same as the page's scripts), so this is the correct place.
-        try:
-            result = page.evaluate("""
-                () => {
-                    var _fn = window.xMidas;
-                    if (typeof _fn !== 'function') return 'not_function';
-                    try {
-                        Object.defineProperty(window, 'xMidas', {
-                            get: function() { return _fn; },
-                            set: function(f) { if (typeof f === 'function') _fn = f; },
-                            configurable: true,
-                            enumerable:   true,
-                        });
-                    } catch(e) {}
-                    var _id = setInterval(function() {
-                        if (typeof window.xMidas !== 'function') {
-                            try { window.xMidas = _fn; } catch(e) {}
-                        } else {
-                            _fn = window.xMidas;
-                        }
-                    }, 50);
-                    setTimeout(function() { clearInterval(_id); }, 120000);
-                    return 'protected';
-                }
-            """)
-            logger.info("[CRYPTO] xMidas protection: %s", result)
-        except Exception as _pe:
-            logger.warning("[CRYPTO] xMidas protection inject failed: %s", _pe)
     except PWTimeout:
-        logger.warning("[CRYPTO] window.xMidas not ready — trying anyway")
+        logger.warning("[CRYPTO] window.xMidas not detected after 30s — JS evaluate will poll")
 
-    # Log whether Forter wrote its tokens (tells us if patchright is working)
     try:
-        info = page.evaluate("""
+        diag = page.evaluate("""
             () => ({
-                forterToken: !!localStorage.getItem('forterToken'),
-                fehCount:    Object.keys(localStorage).filter(k => k.startsWith('feh--')).length,
+                xMidasType:  typeof window.xMidas,
+                xMidasToken: !!document.getElementById('xMidasToken')?.value,
+                url:         location.href,
+                readyState:  document.readyState,
+                midasKeys:   Object.keys(window).filter(k => k.toLowerCase().includes('midas')),
             })
         """)
-        if info.get("forterToken"):
-            logger.info("[CRYPTO] Forter localStorage ready  feh_count=%d", info.get("fehCount", 0))
-        else:
-            logger.warning(
-                "[CRYPTO] forterToken missing from localStorage  "
-                "(patchright not active? run: pip install patchright && patchright install chromium)"
-            )
-    except Exception:
-        pass
+        logger.info("[CRYPTO] pre-call diag: %s", diag)
+    except Exception as _e:
+        logger.warning("[CRYPTO] diag failed: %s", _e)
 
     return True
 
@@ -386,6 +430,9 @@ def call_api_in_browser(
             browser, context = _launch_context(p, storage_state_path)
             page = context.new_page()
 
+            # Route intercept must be registered BEFORE page.goto
+            _setup_chaos_vm_protection(page)
+
             logger.info("[CRYPTO] navigating to %s", redeem_url)
             try:
                 page.goto(redeem_url, wait_until="load", timeout=timeout_ms)
@@ -402,22 +449,6 @@ def call_api_in_browser(
                 return None
 
             payload_json = json.dumps(payload, separators=(",", ":"))
-
-            # Diagnostic: confirm xMidas state from Python side right before calling
-            try:
-                diag = page.evaluate("""
-                    () => ({
-                        xMidasType:    typeof window.xMidas,
-                        xMidasToken:   !!document.getElementById('xMidasToken')?.value,
-                        url:           location.href,
-                        readyState:    document.readyState,
-                        midasKeys:     Object.keys(window).filter(k => k.toLowerCase().includes('midas')),
-                    })
-                """)
-                logger.info("[CRYPTO] pre-call diag: %s", diag)
-            except Exception as _e:
-                logger.warning("[CRYPTO] diag failed: %s", _e)
-
             logger.info("[CRYPTO] calling in-browser fetch  endpoint=%s", endpoint)
 
             result = page.evaluate(_JS_CALL_API, {
@@ -435,23 +466,18 @@ def call_api_in_browser(
 
             if result.get("error"):
                 logger.error(
-                    "[CRYPTO] fetch failed  error=%s  status=%s  "
-                    "encrypt_msg_len=%s  forter_token=%s  feh_count=%s",
+                    "[CRYPTO] fetch failed  error=%s  status=%s  encrypt_msg_len=%s  midasKeys=%s",
                     result.get("error"),
                     result.get("status"),
                     result.get("encrypt_msg_len", "?"),
-                    result.get("forter_token_present"),
-                    result.get("feh_count"),
+                    result.get("midasKeys"),
                 )
                 return None
 
             logger.info(
-                "[CRYPTO] ok  status=%s  encrypt_msg_len=%s  "
-                "forter_token=%s  feh_count=%s",
+                "[CRYPTO] ok  status=%s  encrypt_msg_len=%s",
                 result.get("status"),
                 result.get("encrypt_msg_len"),
-                result.get("forter_token_present"),
-                result.get("feh_count"),
             )
             return result.get("data")
 
@@ -476,6 +502,8 @@ def get_browser_payload(
         with sync_playwright() as p:
             browser, context = _launch_context(p, storage_state_path)
             page = context.new_page()
+
+            _setup_chaos_vm_protection(page)
 
             logger.info("[CRYPTO] navigating to %s", redeem_url)
             try:
