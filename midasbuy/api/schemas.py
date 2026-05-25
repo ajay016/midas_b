@@ -4,6 +4,7 @@ from pydantic import BaseModel, Field
 class PlayerLookupRequest(BaseModel):
     player_id:    str = Field(..., description="PUBG Mobile player UID")
     country_code: str = Field("bd", description="ISO country code")
+    zone_id:      str = Field("", description="PUBG Mobile server zone ID (from /api/zones)")
 
 
 class RedeemRequest(BaseModel):

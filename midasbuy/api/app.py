@@ -9,7 +9,7 @@ from asgiref.sync import sync_to_async
 from fastapi import FastAPI, HTTPException, Query
 
 from .schemas import PlayerLookupResponse, RedeemRequest, RedeemResponse
-from .service import get_player_info, submit_redeem
+from .service import get_player_info, get_zone_list, submit_redeem
 
 logger = logging.getLogger(__name__)
 api_app = FastAPI(title="Midasbuy Redeem API", version="2.0.0")
@@ -64,14 +64,28 @@ async def _resolve_session(account_id: int | None) -> tuple[str | None, str | No
     return await sync_to_async(_resolve_session_sync)(account_id)
 
 
+@api_app.get("/zones")
+async def zones(
+    account_id:   int | None = Query(None),
+    country_code: str = Query("bd"),
+):
+    """Return available PUBG Mobile server zones for getCharacByOpenid."""
+    ssp, cookies = await _resolve_session(account_id)
+    if not ssp:
+        raise HTTPException(status_code=400, detail="No session. Please log in first.")
+    zone_list = await get_zone_list(ssp, country_code)
+    return {"zones": zone_list}
+
+
 @api_app.get("/player-info", response_model=PlayerLookupResponse)
 async def player_info(
     player_id:    str = Query(...),
     country_code: str = Query("bd"),
+    zone_id:      str = Query(""),
     account_id:   int | None = Query(None),
 ):
     ssp, cookies = await _resolve_session(account_id)
-    result = await get_player_info(player_id, country_code, ssp, cookies)
+    result = await get_player_info(player_id, country_code, ssp, cookies, zone_id)
     if not result.success:
         raise HTTPException(status_code=400, detail=result.error)
     return result
