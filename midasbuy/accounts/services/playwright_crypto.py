@@ -15,6 +15,14 @@ import logging
 import os
 from typing import Optional
 
+_SESSION_STORAGE_JS = """
+    (data) => {
+        for (const [k, v] of Object.entries(data)) {
+            try { sessionStorage.setItem(k, v); } catch(e) {}
+        }
+    }
+"""
+
 logger = logging.getLogger(__name__)
 
 _JS_CALL_API = """
@@ -98,11 +106,39 @@ _JS_ENCRYPT_ONLY = """
 """
 
 
+def _load_session_storage(storage_state_path: str) -> dict:
+    """Load saved sessionStorage data if it exists next to the storage_state file."""
+    ss_path = os.path.join(os.path.dirname(storage_state_path), "session_storage.json")
+    if not os.path.exists(ss_path):
+        return {}
+    try:
+        with open(ss_path, encoding="utf-8") as f:
+            data = json.load(f)
+        logger.info("[CRYPTO] loaded %d sessionStorage keys from %s", len(data), ss_path)
+        return data
+    except Exception as e:
+        logger.warning("[CRYPTO] could not load session_storage.json: %s", e)
+        return {}
+
+
 def _launch_context(p, storage_state_path: str):
     browser = p.chromium.launch(
         headless=True,
-        args=["--no-sandbox", "--disable-dev-shm-usage"],
+        args=[
+            "--no-sandbox",
+            "--disable-dev-shm-usage",
+            "--disable-blink-features=AutomationControlled",
+            # Enable software WebGL/canvas so the Chaos VM gets non-blank fingerprint data
+            "--enable-webgl",
+            "--use-gl=swiftshader",
+            "--ignore-gpu-blocklist",
+            "--enable-accelerated-2d-canvas",
+            "--enable-features=NetworkService,NetworkServiceInProcess",
+        ],
     )
+
+    ss_data = _load_session_storage(storage_state_path)
+
     context = browser.new_context(
         storage_state=storage_state_path,
         viewport={"width": 1440, "height": 900},
@@ -112,9 +148,23 @@ def _launch_context(p, storage_state_path: str):
             "Chrome/124.0.0.0 Safari/537.36"
         ),
     )
+    # Hide automation signals
     context.add_init_script(
         "Object.defineProperty(navigator, 'webdriver', { get: () => undefined });"
     )
+    # Restore Forter blackbox + other sessionStorage before page scripts run
+    if ss_data:
+        ss_json = json.dumps(ss_data)
+        context.add_init_script(f"""
+            (() => {{
+                const data = {ss_json};
+                for (const [k, v] of Object.entries(data)) {{
+                    try {{ sessionStorage.setItem(k, v); }} catch(e) {{}}
+                }}
+            }})();
+        """)
+        logger.info("[CRYPTO] injected %d sessionStorage keys via init_script", len(ss_data))
+
     return browser, context
 
 
@@ -140,6 +190,20 @@ def _wait_for_xmidas(page, session_dir: str, timeout_ms: int) -> bool:
         logger.info("[CRYPTO] window.xMidas ready")
     except PWTimeout:
         logger.warning("[CRYPTO] window.xMidas not ready after 15 s — trying anyway")
+
+    # Wait for the Forter anti-fraud SDK to write its blackbox fingerprint.
+    # Without this the Chaos VM reads an empty blackbox → small encrypt_msg → HTTP 500.
+    try:
+        page.wait_for_function(
+            "() => !!window.sessionStorage.getItem('blackbox-selection')",
+            timeout=10_000,
+        )
+        blackbox_len = page.evaluate(
+            "() => (window.sessionStorage.getItem('blackbox-selection') || '').length"
+        )
+        logger.info("[CRYPTO] Forter blackbox-selection ready  len=%d", blackbox_len)
+    except PWTimeout:
+        logger.warning("[CRYPTO] blackbox-selection not ready — Forter SDK may not have run; encrypt_msg may be small")
 
     return True
 

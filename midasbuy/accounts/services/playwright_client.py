@@ -7,6 +7,7 @@ from accounts.utils import (
     get_html_snapshot_file_path,
     get_meta_file_path,
     get_screenshot_file_path,
+    get_session_storage_file_path,
     get_storage_state_file_path,
     get_token_file_path,
     get_xmidas_token_file_path,
@@ -20,13 +21,14 @@ logger = logging.getLogger(__name__)
 
 
 def run_browser_login_session(account, session_dir: str) -> dict:
-    screenshot_path    = get_screenshot_file_path(session_dir, "browser_open.png")
-    html_snapshot_path = get_html_snapshot_file_path(session_dir, "browser_page.html")
-    storage_state_path = get_storage_state_file_path(session_dir)
-    cookie_path        = get_cookie_file_path(session_dir)
-    token_path         = get_token_file_path(session_dir)
-    xmidas_token_path  = get_xmidas_token_file_path(session_dir)
-    meta_path          = get_meta_file_path(session_dir)
+    screenshot_path       = get_screenshot_file_path(session_dir, "browser_open.png")
+    html_snapshot_path    = get_html_snapshot_file_path(session_dir, "browser_page.html")
+    storage_state_path    = get_storage_state_file_path(session_dir)
+    session_storage_path  = get_session_storage_file_path(session_dir)
+    cookie_path           = get_cookie_file_path(session_dir)
+    token_path            = get_token_file_path(session_dir)
+    xmidas_token_path     = get_xmidas_token_file_path(session_dir)
+    meta_path             = get_meta_file_path(session_dir)
 
     base_url = getattr(
         settings,
@@ -115,6 +117,34 @@ def run_browser_login_session(account, session_dir: str) -> dict:
                         "document.getElementById('xMidasToken').value"
                     )
                     logger.info("[MIDASBUY] xMidasToken captured: %s...", xmidas_token[:20] if xmidas_token else "EMPTY")
+
+                    # Wait for Forter SDK to finish writing blackbox-selection
+                    try:
+                        page.wait_for_function(
+                            "() => !!window.sessionStorage.getItem('blackbox-selection')",
+                            timeout=10_000,
+                        )
+                        logger.info("[MIDASBUY] Forter blackbox-selection ready")
+                    except Exception:
+                        logger.warning("[MIDASBUY] blackbox-selection not found after 10 s — saving anyway")
+
+                    # Capture full sessionStorage to restore later in the crypto context
+                    try:
+                        ss_data = page.evaluate("""
+                            () => {
+                                const d = {};
+                                for (let i = 0; i < sessionStorage.length; i++) {
+                                    const k = sessionStorage.key(i);
+                                    d[k] = sessionStorage.getItem(k);
+                                }
+                                return d;
+                            }
+                        """)
+                        save_json_file(session_storage_path, ss_data)
+                        logger.info("[MIDASBUY] sessionStorage saved: %d keys", len(ss_data))
+                    except Exception as e:
+                        logger.warning("[MIDASBUY] Failed to capture sessionStorage: %s", e)
+
                 except Exception as e:
                     logger.warning("[MIDASBUY] Failed to capture xMidasToken: %s", e)
 

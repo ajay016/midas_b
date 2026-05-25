@@ -81,6 +81,10 @@ def get_xmidas_token_file_path(session_dir: str) -> str:
     return os.path.join(session_dir, "xmidas_token.txt")
 
 
+def get_session_storage_file_path(session_dir: str) -> str:
+    return os.path.join(session_dir, "session_storage.json")
+
+
 def get_account_token(session_dir: str) -> str:
     token_path = get_token_file_path(session_dir)
     token = load_text_file(token_path)
