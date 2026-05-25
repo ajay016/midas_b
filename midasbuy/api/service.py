@@ -77,13 +77,19 @@ async def _call_api(
         logger.error("[SERVICE] failed to generate browser payload")
         return None
 
-    # Use cookies captured from the browser context after page load.
-    # The server rotates ctoken on each page visit; xMidasToken.value equals
-    # the new ctoken cookie.  body.ctoken and Cookie.ctoken must match.
-    cookies = enc.get("fresh_cookies") or _load_all_cookies(storage_state_path)
+    # Start with ALL cookies from storage_state (17) — the browser page visit
+    # causes the server to drop 2 cookies from the live context (15), and those
+    # 2 missing cookies are needed for authentication.
+    # Then override ctoken with the fresh value from the page so body.ctoken
+    # and Cookie.ctoken stay in sync (server does double-submit CSRF check).
+    cookies = _load_all_cookies(storage_state_path)
     if not cookies:
-        logger.error("[SERVICE] no cookies available")
+        logger.error("[SERVICE] no cookies in storage_state")
         return None
+    fresh_ctoken = enc.get("ctoken")
+    if fresh_ctoken:
+        cookies["ctoken"] = fresh_ctoken
+        logger.info("[SERVICE] ctoken overridden with fresh value prefix=%s", fresh_ctoken[:20])
 
     body = {
         "encrypt_msg": enc["encrypt_msg"],
