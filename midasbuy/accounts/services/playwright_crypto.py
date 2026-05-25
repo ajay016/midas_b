@@ -308,6 +308,36 @@ def _wait_for_xmidas(page, session_dir: str, timeout_ms: int) -> bool:
             timeout=30_000,
         )
         logger.info("[CRYPTO] window.xMidas ready")
+        # xMidas is alive RIGHT NOW in the main world — lock it before SPA deletes it.
+        # add_init_script runs in patchright's isolated world; page.evaluate runs in
+        # the MAIN world (same as the page's scripts), so this is the correct place.
+        try:
+            result = page.evaluate("""
+                () => {
+                    var _fn = window.xMidas;
+                    if (typeof _fn !== 'function') return 'not_function';
+                    try {
+                        Object.defineProperty(window, 'xMidas', {
+                            get: function() { return _fn; },
+                            set: function(f) { if (typeof f === 'function') _fn = f; },
+                            configurable: true,
+                            enumerable:   true,
+                        });
+                    } catch(e) {}
+                    var _id = setInterval(function() {
+                        if (typeof window.xMidas !== 'function') {
+                            try { window.xMidas = _fn; } catch(e) {}
+                        } else {
+                            _fn = window.xMidas;
+                        }
+                    }, 50);
+                    setTimeout(function() { clearInterval(_id); }, 120000);
+                    return 'protected';
+                }
+            """)
+            logger.info("[CRYPTO] xMidas protection: %s", result)
+        except Exception as _pe:
+            logger.warning("[CRYPTO] xMidas protection inject failed: %s", _pe)
     except PWTimeout:
         logger.warning("[CRYPTO] window.xMidas not ready — trying anyway")
 
