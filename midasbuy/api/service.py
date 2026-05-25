@@ -56,7 +56,10 @@ async def _api_call(
                     country_code, xmidas_token, page_data,
                 )
                 if result is not None:
-                    logger.info("[SERVICE] python-crypto ok  ret=%s", result.get("ret"))
+                    logger.info(
+                        "[SERVICE] python-crypto response  ret=%s  msg=%s  has_page_data=%s",
+                        result.get("ret"), result.get("msg"), bool(page_data),
+                    )
                     return result
                 logger.warning("[SERVICE] python-crypto returned None — falling back to browser")
         except Exception as exc:

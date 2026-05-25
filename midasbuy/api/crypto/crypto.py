@@ -91,16 +91,12 @@ def call_api_python(
     if not xmidas_token:
         return None
 
-    public_params = build_public_params(page_data or {}, country_code)
-    full_payload  = {**public_params, **payload}  # payload wins on overlap
-
-    body = build_encrypted_payload(full_payload, xmidas_token, "1.0.1")
-
     # Extract cookies that apply to www.midasbuy.com
     with open(storage_state_path, encoding="utf-8") as f:
         ss = json.load(f)
 
     cookies = {}
+    uuid_cookie = ""
     for c in ss.get("cookies", []):
         name  = c.get("name", "")
         value = c.get("value", "")
@@ -109,18 +105,37 @@ def call_api_python(
         domain = c.get("domain", "")
         if "midasbuy.com" in domain:
             cookies[name] = value
+            if name == "UUID":
+                uuid_cookie = value
+
+    # Use UUID cookie from stored session as tdrc_fp if page_data doesn't have it
+    effective_page_data = dict(page_data or {})
+    if not effective_page_data.get("uuidCookie") and uuid_cookie:
+        effective_page_data["uuidCookie"] = uuid_cookie
+
+    public_params = build_public_params(effective_page_data, country_code)
+    full_payload  = {**public_params, **payload}  # payload wins on overlap
+
+    body = build_encrypted_payload(full_payload, xmidas_token, "1.0.1")
 
     url = f"https://www.midasbuy.com{endpoint}"
     headers = {
-        "Content-Type": "application/json",
-        "Accept":       "application/json, text/plain, */*",
-        "User-Agent":   (
+        "Content-Type":    "application/json",
+        "Accept":          "application/json, text/plain, */*",
+        "Accept-Language": "en-US,en;q=0.9",
+        "User-Agent":      (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
             "AppleWebKit/537.36 (KHTML, like Gecko) "
             "Chrome/120.0.0.0 Safari/537.36"
         ),
-        "Origin":       "https://www.midasbuy.com",
-        "Referer":      f"https://www.midasbuy.com/midasbuy/{country_code}/redeem/pubgm",
+        "Origin":          "https://www.midasbuy.com",
+        "Referer":         f"https://www.midasbuy.com/midasbuy/{country_code}/redeem/pubgm",
+        "Sec-Fetch-Dest":  "empty",
+        "Sec-Fetch-Mode":  "cors",
+        "Sec-Fetch-Site":  "same-origin",
+        "Sec-Ch-Ua":       '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
+        "Sec-Ch-Ua-Mobile": "?0",
+        "Sec-Ch-Ua-Platform": '"Windows"',
     }
 
     with httpx.Client(timeout=30.0, follow_redirects=True) as client:
