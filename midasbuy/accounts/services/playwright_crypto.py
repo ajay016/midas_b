@@ -79,6 +79,19 @@ _STEALTH_JS = """
         if (!navigator.hardwareConcurrency || navigator.hardwareConcurrency < 2)
             Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 8 });
     } catch(e) {}
+
+    // Capture window.xMidas the instant the Chaos VM assigns it.
+    // The SPA may clear window.xMidas during hydration, but our getter still
+    // returns the captured reference so page.evaluate() always sees a function.
+    try {
+        let _xMidasCapture = undefined;
+        Object.defineProperty(window, 'xMidas', {
+            get:          () => _xMidasCapture,
+            set: (fn) => { if (typeof fn === 'function') _xMidasCapture = fn; },
+            configurable: true,
+            enumerable:   true,
+        });
+    } catch(e) {}
 })();
 """
 
@@ -350,6 +363,22 @@ def call_api_in_browser(
                 return None
 
             payload_json = json.dumps(payload, separators=(",", ":"))
+
+            # Diagnostic: confirm xMidas state from Python side right before calling
+            try:
+                diag = page.evaluate("""
+                    () => ({
+                        xMidasType:    typeof window.xMidas,
+                        xMidasToken:   !!document.getElementById('xMidasToken')?.value,
+                        url:           location.href,
+                        readyState:    document.readyState,
+                        midasKeys:     Object.keys(window).filter(k => k.toLowerCase().includes('midas')),
+                    })
+                """)
+                logger.info("[CRYPTO] pre-call diag: %s", diag)
+            except Exception as _e:
+                logger.warning("[CRYPTO] diag failed: %s", _e)
+
             logger.info("[CRYPTO] calling in-browser fetch  endpoint=%s", endpoint)
 
             result = page.evaluate(_JS_CALL_API, {
