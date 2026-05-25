@@ -1,7 +1,7 @@
 """
 Python port of window.xMidas() — AES-256-CBC encryption.
 
-Key   : first 32 bytes of hex-decoded xMidasToken (ctoken)
+Key   : ASCII bytes of first 32 chars of xMidasToken string (charCodeAt, not hex-decode)
 IV    : 16 random bytes, prepended to the ciphertext
 Output: Base64(IV + AES-256-CBC(PKCS7(JSON(payload))))
 
@@ -25,7 +25,7 @@ def xmidas_encrypt(payload: dict, ctoken_hex: str) -> str:
     plaintext = json.dumps(payload, separators=(",", ":")).encode("utf-8")
     padded    = pad(plaintext, AES.block_size)
     iv        = os.urandom(16)
-    key       = bytes.fromhex(ctoken_hex)[:32]
+    key       = ctoken_hex[:32].encode('ascii')
     cipher    = AES.new(key, AES.MODE_CBC, iv)
     return base64.b64encode(iv + cipher.encrypt(padded)).decode("ascii")
 
