@@ -1,37 +1,34 @@
 """
 Midasbuy API service.
 
-For every call:
-  1. Playwright navigates to the redeem page (using saved storage_state),
-     calls window.xMidas({d: JSON.stringify(payload)}) to get encrypt_msg,
-     and reads ctoken from document.getElementById('xMidasToken').value.
-  2. Python loads all session cookies from storage_state.json.
-  3. httpx POSTs {encrypt_msg, ctoken, ctoken_ver} with session cookies and
-     browser-like headers (Origin, Referer, User-Agent, Accept).
+All API calls use Python AES-256-CBC crypto (reverse-engineered from the
+obfuscated window.xMidas SDK) to produce encrypt_msg.  The live xMidasToken
+is captured once during login (saved to xmidas_token.txt) and reused here
+as the AES key.  No Playwright is needed for individual API calls.
 
-Why Playwright for encrypt_msg:
-  window.xMidas is an obfuscated Tencent SDK.  Our Python AES port produced
-  a different ciphertext length (236 vs 216 chars) — the algorithm or key
-  schedule is not a simple AES-256-CBC.  The browser always gets it right.
-
-Why httpx for the HTTP call:
-  Browser-internal fetch() was getting HTTP 500 because it didn't include all
-  required headers.  httpx lets us set Origin, Referer, User-Agent explicitly.
+Encryption details (from midas_crypto/crypto.py):
+  Key = first 32 bytes of hex-decoded xMidasToken
+  IV  = 16 random bytes prepended to ciphertext
+  Output = base64(IV + AES-256-CBC(payload_json))
 """
-import asyncio
+import base64
 import json
 import logging
+import os
 from typing import Optional
 
 import httpx
+from Crypto.Cipher import AES
+from Crypto.Util.Padding import pad
 
 from .schemas import PlayerInfo, PlayerLookupResponse, RedeemResponse
 
 logger = logging.getLogger(__name__)
 
-_BASE  = "https://www.midasbuy.com"
-_APPID = "1900000047"
-_PF    = "mds_pc_browser-yy-android-midasweb-midasbuy-self.midasbuy_saas"
+_BASE    = "https://www.midasbuy.com"
+_APPID   = "1900000047"
+_PF      = "mds_pc_browser-yy-android-midasweb-midasbuy-self.midasbuy_saas"
+_VERSION = "1.0.1"
 
 _UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -39,9 +36,53 @@ _UA = (
     "Chrome/124.0.0.0 Safari/537.36"
 )
 
+_HEADERS = {
+    "User-Agent":   _UA,
+    "Referer":      "https://www.midasbuy.com/",
+    "Origin":       "https://www.midasbuy.com",
+    "Content-Type": "application/json",
+    "Accept":       "application/json, text/plain, */*",
+}
 
-def _load_all_cookies(storage_state_path: str) -> dict:
-    """Load every cookie from storage_state.json — no domain filter."""
+
+# ── Crypto ────────────────────────────────────────────────────────────────────
+
+def _xmidas_encrypt(payload: dict, ctoken_hex: str) -> str:
+    plaintext = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    padded    = pad(plaintext, AES.block_size)
+    iv        = os.urandom(16)
+    key       = bytes.fromhex(ctoken_hex)[:32]
+    cipher    = AES.new(key, AES.MODE_CBC, iv)
+    return base64.b64encode(iv + cipher.encrypt(padded)).decode("ascii")
+
+
+def _build_envelope(payload: dict, ctoken_hex: str) -> dict:
+    return {
+        "encrypt_msg": _xmidas_encrypt(payload, ctoken_hex),
+        "ctoken_ver":  _VERSION,
+        "ctoken":      ctoken_hex,
+    }
+
+
+# ── Session helpers ───────────────────────────────────────────────────────────
+
+def _load_xmidas_token(storage_state_path: str) -> Optional[str]:
+    """Read xMidasToken from xmidas_token.txt saved alongside storage_state."""
+    session_dir = os.path.dirname(storage_state_path)
+    token_path  = os.path.join(session_dir, "xmidas_token.txt")
+    try:
+        with open(token_path, encoding="utf-8") as f:
+            token = f.read().strip()
+        if token:
+            logger.info("[SERVICE] xMidasToken loaded prefix=%s", token[:20])
+            return token
+        logger.error("[SERVICE] xmidas_token.txt is empty")
+    except Exception as e:
+        logger.error("[SERVICE] cannot read xmidas_token.txt: %s", e)
+    return None
+
+
+def _load_cookies(storage_state_path: str) -> dict:
     try:
         with open(storage_state_path, encoding="utf-8") as f:
             state = json.load(f)
@@ -57,78 +98,7 @@ def _load_all_cookies(storage_state_path: str) -> dict:
         return {}
 
 
-async def _call_api(
-    payload: dict,
-    api_url: str,
-    storage_state_path: str,
-    country_code: str,
-) -> Optional[dict]:
-    """
-    1. Use Playwright to generate encrypt_msg + ctoken from the live browser.
-    2. Load session cookies from storage_state.json.
-    3. POST via httpx with cookies + encrypted body + browser headers.
-    """
-    from accounts.services.playwright_crypto import get_browser_payload
-
-    enc = await asyncio.to_thread(
-        get_browser_payload, payload, storage_state_path, country_code
-    )
-    if not enc:
-        logger.error("[SERVICE] failed to generate browser payload")
-        return None
-
-    # Start with ALL cookies from storage_state (17) — the browser page visit
-    # causes the server to drop 2 cookies from the live context (15), and those
-    # 2 missing cookies are needed for authentication.
-    # Then override ctoken with the fresh value from the page so body.ctoken
-    # and Cookie.ctoken stay in sync (server does double-submit CSRF check).
-    cookies = _load_all_cookies(storage_state_path)
-    if not cookies:
-        logger.error("[SERVICE] no cookies in storage_state")
-        return None
-    fresh_ctoken = enc.get("ctoken")
-    if fresh_ctoken:
-        cookies["ctoken"] = fresh_ctoken
-        logger.info("[SERVICE] ctoken overridden with fresh value prefix=%s", fresh_ctoken[:20])
-
-    body = {
-        "encrypt_msg": enc["encrypt_msg"],
-        "ctoken":      enc["ctoken"],
-        "ctoken_ver":  enc["ctoken_ver"],
-    }
-
-    referer = f"https://www.midasbuy.com/midasbuy/{country_code}/redeem/pubgm"
-    headers = {
-        "Content-Type": "application/json",
-        "Accept":        "application/json, text/plain, */*",
-        "Origin":        "https://www.midasbuy.com",
-        "Referer":       referer,
-        "User-Agent":    _UA,
-    }
-
-    logger.info(
-        "[SERVICE] POST %s  ctoken_prefix=%s  encrypt_msg_len=%d",
-        api_url, enc["ctoken"][:20], len(enc["encrypt_msg"]),
-    )
-
-    try:
-        async with httpx.AsyncClient(follow_redirects=True, timeout=30.0) as client:
-            resp = await client.post(api_url, json=body, cookies=cookies, headers=headers)
-
-        logger.info("[SERVICE] status=%s", resp.status_code)
-
-        if resp.status_code != 200:
-            logger.error("[SERVICE] non-200 body: %s", resp.text[:800])
-            return None
-
-        data = resp.json()
-        logger.info("[SERVICE] raw response: %s", data)
-        return data
-
-    except Exception:
-        logger.exception("[SERVICE] httpx request failed")
-        return None
-
+# ── API calls ─────────────────────────────────────────────────────────────────
 
 async def get_player_info(
     player_id: str,
@@ -137,38 +107,59 @@ async def get_player_info(
     cookies: Optional[str] = None,
 ) -> PlayerLookupResponse:
     if not storage_state_path:
-        return PlayerLookupResponse(success=False, error="No session. Please log in to a Midasbuy account first.")
+        return PlayerLookupResponse(success=False, error="No session. Please log in first.")
 
-    payload = {
-        "roleId":  player_id,
-        "appId":   _APPID,
-        "game":    "pubgm",
-        "pf":      _PF,
-        "country": country_code.upper(),
+    ctoken = _load_xmidas_token(storage_state_path)
+    if not ctoken:
+        return PlayerLookupResponse(success=False, error="No xMidasToken found. Please re-login.")
+
+    raw_params = {
+        "player_id":  player_id,
+        "appid":      _APPID,
+        "pf":         _PF,
+        "country":    country_code.upper(),
+        "client_ver": "android",
     }
 
-    data = await _call_api(payload, _BASE + "/interface/getCharac", storage_state_path, country_code)
+    envelope = _build_envelope(raw_params, ctoken)
+    url      = _BASE + "/interface/queryRoleDetail"
 
-    if data is None:
-        return PlayerLookupResponse(success=False, error="Failed to call Midasbuy API. Check logs.")
+    logger.info("[SERVICE] GET %s  ctoken_prefix=%s", url, ctoken[:20])
 
-    if data.get("ret") != 0:
+    try:
+        async with httpx.AsyncClient(headers=_HEADERS, follow_redirects=True, timeout=15.0) as client:
+            resp = await client.get(url, params=envelope)
+
+        logger.info("[SERVICE] status=%s", resp.status_code)
+
+        if resp.status_code != 200:
+            logger.error("[SERVICE] non-200: %s", resp.text[:400])
+            return PlayerLookupResponse(success=False, error=f"HTTP {resp.status_code}")
+
+        data = resp.json()
+        logger.info("[SERVICE] raw response: %s", data)
+
+        if data.get("ret") != 0:
+            return PlayerLookupResponse(
+                success=False,
+                error=data.get("msg") or f"API error ret={data.get('ret')}",
+            )
+
+        role = data.get("data", {})
         return PlayerLookupResponse(
-            success=False,
-            error=data.get("msg") or f"API error ret={data.get('ret')}",
+            success=True,
+            player=PlayerInfo(
+                player_id=player_id,
+                username=role.get("roleName") or role.get("role_name") or role.get("charac_name") or "",
+                role_id=str(role.get("roleId") or role.get("role_id") or role.get("openid") or player_id),
+                server_id=str(role.get("serverId") or role.get("server_id") or ""),
+                zone_id=str(role.get("zoneid") or ""),
+            ),
         )
 
-    info = data.get("info", {})
-    return PlayerLookupResponse(
-        success=True,
-        player=PlayerInfo(
-            player_id=player_id,
-            username=info.get("charac_name") or "",
-            role_id=info.get("openid") or player_id,
-            server_id="",
-            zone_id=str(info.get("zoneid") or ""),
-        ),
-    )
+    except Exception:
+        logger.exception("[SERVICE] get_player_info failed")
+        return PlayerLookupResponse(success=False, error="Request failed. Check logs.")
 
 
 async def query_code_info(
@@ -181,7 +172,13 @@ async def query_code_info(
     if not storage_state_path:
         return RedeemResponse(success=False, message="No session.")
 
-    payload = {
+    ctoken       = _load_xmidas_token(storage_state_path)
+    session_cookies = _load_cookies(storage_state_path)
+
+    if not ctoken:
+        return RedeemResponse(success=False, message="No xMidasToken. Please re-login.")
+
+    raw_payload = {
         "roleId":  player_id,
         "appId":   _APPID,
         "game":    "pubgm",
@@ -191,23 +188,41 @@ async def query_code_info(
         "channel": "MIDASBUY_REDEEM",
     }
 
-    url  = _BASE + "/interface/shelfProto/shelves_svr/QueryRedeemCodeInfo"
-    data = await _call_api(payload, url, storage_state_path, country_code)
+    envelope = _build_envelope(raw_payload, ctoken)
+    url      = _BASE + "/interface/shelfProto/shelves_svr/QueryRedeemCodeInfo"
 
-    if data is None:
-        return RedeemResponse(success=False, message="Failed to call Midasbuy API.")
+    logger.info("[SERVICE] POST %s  ctoken_prefix=%s", url, ctoken[:20])
 
-    ret = data.get("ret", -1)
-    if ret != 0:
-        return RedeemResponse(
-            success=False,
-            message=data.get("msg") or f"Code error: {data.get('err_code', 'unknown')}",
-            raw=data,
-        )
+    try:
+        async with httpx.AsyncClient(
+            headers=_HEADERS, cookies=session_cookies, follow_redirects=True, timeout=20.0
+        ) as client:
+            resp = await client.post(url, json=envelope)
 
-    products = data.get("redeem_code_info", {}).get("products", [])
-    desc = ", ".join(p.get("name", "") for p in products) if products else "Unknown reward"
-    return RedeemResponse(success=True, message=f"Code valid: {desc}", raw=data)
+        logger.info("[SERVICE] status=%s", resp.status_code)
+
+        if resp.status_code != 200:
+            logger.error("[SERVICE] non-200: %s", resp.text[:400])
+            return RedeemResponse(success=False, message=f"HTTP {resp.status_code}")
+
+        data = resp.json()
+        logger.info("[SERVICE] raw response: %s", data)
+
+        ret = data.get("ret", -1)
+        if ret != 0:
+            return RedeemResponse(
+                success=False,
+                message=data.get("msg") or f"Code error: {data.get('err_code', 'unknown')}",
+                raw=data,
+            )
+
+        products = data.get("redeem_code_info", {}).get("products", [])
+        desc     = ", ".join(p.get("name", "") for p in products) if products else "Unknown reward"
+        return RedeemResponse(success=True, message=f"Code valid: {desc}", raw=data)
+
+    except Exception:
+        logger.exception("[SERVICE] query_code_info failed")
+        return RedeemResponse(success=False, message="Request failed. Check logs.")
 
 
 async def submit_redeem(
@@ -221,7 +236,10 @@ async def submit_redeem(
     if not check.success:
         return check
 
-    payload = {
+    ctoken          = _load_xmidas_token(storage_state_path)
+    session_cookies = _load_cookies(storage_state_path)
+
+    raw_payload = {
         "roleId":    player_id,
         "appId":     _APPID,
         "game":      "pubgm",
@@ -232,16 +250,34 @@ async def submit_redeem(
         "channelId": "MIDASBUY_REDEEM",
     }
 
-    url  = _BASE + "/interface/shelfProto/shelves_svr/RedeemCode"
-    data = await _call_api(payload, url, storage_state_path, country_code)
+    envelope = _build_envelope(raw_payload, ctoken)
+    url      = _BASE + "/interface/shelfProto/shelves_svr/RedeemCode"
 
-    if data is None:
-        return RedeemResponse(success=False, message="Failed to call Midasbuy API.")
+    logger.info("[SERVICE] POST %s  ctoken_prefix=%s", url, ctoken[:20])
 
-    ret = data.get("ret", -1)
-    msg = data.get("msg", "")
-    return RedeemResponse(
-        success=(ret == 0),
-        message=msg or ("Redeemed successfully!" if ret == 0 else "Redemption failed"),
-        raw=data,
-    )
+    try:
+        async with httpx.AsyncClient(
+            headers=_HEADERS, cookies=session_cookies, follow_redirects=True, timeout=20.0
+        ) as client:
+            resp = await client.post(url, json=envelope)
+
+        logger.info("[SERVICE] status=%s", resp.status_code)
+
+        if resp.status_code != 200:
+            logger.error("[SERVICE] non-200: %s", resp.text[:400])
+            return RedeemResponse(success=False, message=f"HTTP {resp.status_code}")
+
+        data = resp.json()
+        logger.info("[SERVICE] raw response: %s", data)
+
+        ret = data.get("ret", -1)
+        msg = data.get("msg", "")
+        return RedeemResponse(
+            success=(ret == 0),
+            message=msg or ("Redeemed successfully!" if ret == 0 else "Redemption failed"),
+            raw=data,
+        )
+
+    except Exception:
+        logger.exception("[SERVICE] submit_redeem failed")
+        return RedeemResponse(success=False, message="Request failed. Check logs.")
