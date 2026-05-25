@@ -138,6 +138,16 @@ def get_browser_payload(
 
             result = page.evaluate(_JS, {"payloadJson": payload_json})
 
+            # Capture cookies AFTER page load — the server rotates ctoken on each
+            # visit.  xMidasToken.value == the new ctoken cookie.  We must send
+            # the same fresh ctoken both in the request body AND Cookie header.
+            fresh_cookies = {
+                c["name"]: c["value"]
+                for c in context.cookies()
+                if c.get("name") and c.get("value")
+            }
+            logger.info("[CRYPTO] fresh cookie count=%d", len(fresh_cookies))
+
             _save_debug(page, session_dir, "crypto_done")
             browser.close()
 
@@ -156,9 +166,10 @@ def get_browser_payload(
                 result["ctoken_ver"],
             )
             return {
-                "encrypt_msg": result["encrypt_msg"],
-                "ctoken":      result["ctoken"],
-                "ctoken_ver":  result["ctoken_ver"],
+                "encrypt_msg":   result["encrypt_msg"],
+                "ctoken":        result["ctoken"],
+                "ctoken_ver":    result["ctoken_ver"],
+                "fresh_cookies": fresh_cookies,
             }
 
     except Exception:

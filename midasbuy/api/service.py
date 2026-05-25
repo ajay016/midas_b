@@ -77,9 +77,12 @@ async def _call_api(
         logger.error("[SERVICE] failed to generate browser payload")
         return None
 
-    cookies = _load_all_cookies(storage_state_path)
+    # Use cookies captured from the browser context after page load.
+    # The server rotates ctoken on each page visit; xMidasToken.value equals
+    # the new ctoken cookie.  body.ctoken and Cookie.ctoken must match.
+    cookies = enc.get("fresh_cookies") or _load_all_cookies(storage_state_path)
     if not cookies:
-        logger.error("[SERVICE] no cookies in storage_state")
+        logger.error("[SERVICE] no cookies available")
         return None
 
     body = {
