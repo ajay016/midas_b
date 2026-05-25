@@ -80,52 +80,26 @@ _STEALTH_JS = """
             Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 8 });
     } catch(e) {}
 
-    // xMidas preservation ─────────────────────────────────────────────────────
-    // The Chaos VM assigns window.xMidas via Object.defineProperty (not direct
-    // assignment), so a plain setter trap is bypassed. The SPA then calls
-    // `delete window.xMidas` during hydration (confirmed: midasKeys=[]).
+    // xMidas restoration ──────────────────────────────────────────────────────
+    // Diagnostic confirmed: readyState='interactive', midasKeys=[] when we
+    // evaluate. The Chaos VM sets window.xMidas during script loading and the
+    // SPA deletes it during hydration. The Object.defineProperty intercept did
+    // not work because the Chaos VM holds a cached reference to the native
+    // defineProperty obtained at parse time (before our init script executed).
     //
-    // Fix:
-    //  1. Save the real Object.defineProperty and patch the global one so we
-    //     intercept every defineProperty(window, 'xMidas', …) call.
-    //  2. When captured, reinstall our getter/setter so future clears are no-ops.
-    //  3. Poll every 200 ms; if the SPA managed to delete it, reinstall.
+    // New approach: simple 50ms poll. Capture xMidas the moment it appears;
+    // restore it via direct assignment if the SPA deletes it. Works regardless
+    // of HOW the Chaos VM sets the property.
     (function() {
-        let _saved = undefined;
-        const _orig = Object.defineProperty.bind(Object);
-
-        function _protect() {
-            try {
-                _orig(window, 'xMidas', {
-                    get:          () => _saved,
-                    set: (fn) => { if (typeof fn === 'function') _saved = fn; },
-                    configurable: true,
-                    enumerable:   true,
-                });
-            } catch(e) {}
-        }
-
-        // Intercept Object.defineProperty(window, 'xMidas', …)
-        Object.defineProperty = function(obj, prop, desc) {
-            if ((obj === window || obj === globalThis) &&
-                typeof prop === 'string' && prop.toLowerCase() === 'xmidas') {
-                if (typeof desc.value === 'function') _saved = desc.value;
-                _protect();
-                return window;
+        var _saved = undefined;
+        var _id = setInterval(function() {
+            if (typeof window.xMidas === 'function') {
+                if (_saved !== window.xMidas) _saved = window.xMidas;
+            } else if (typeof _saved === 'function') {
+                try { window.xMidas = _saved; } catch(e) {}
             }
-            return _orig.call(Object, obj, prop, desc);
-        };
-
-        // Also catch direct assignment (window.xMidas = fn)
-        _protect();
-
-        // Reinstall every 200 ms if the SPA managed to delete the property
-        const _id = setInterval(() => {
-            if (typeof _saved === 'function' && typeof window.xMidas !== 'function') {
-                _protect();
-            }
-        }, 200);
-        setTimeout(() => clearInterval(_id), 120_000);
+        }, 50);
+        setTimeout(function() { clearInterval(_id); }, 120000);
     })();
 })();
 """
@@ -331,7 +305,7 @@ def _wait_for_xmidas(page, session_dir: str, timeout_ms: int) -> bool:
     try:
         page.wait_for_function(
             "() => typeof window.xMidas === 'function'",
-            timeout=15_000,
+            timeout=30_000,
         )
         logger.info("[CRYPTO] window.xMidas ready")
     except PWTimeout:
@@ -384,7 +358,7 @@ def call_api_in_browser(
 
             logger.info("[CRYPTO] navigating to %s", redeem_url)
             try:
-                page.goto(redeem_url, wait_until="domcontentloaded", timeout=timeout_ms)
+                page.goto(redeem_url, wait_until="load", timeout=timeout_ms)
             except PWTimeout:
                 logger.error("[CRYPTO] page.goto timed out")
                 _save_debug(page, session_dir, "crypto_timeout")
@@ -475,7 +449,7 @@ def get_browser_payload(
 
             logger.info("[CRYPTO] navigating to %s", redeem_url)
             try:
-                page.goto(redeem_url, wait_until="domcontentloaded", timeout=timeout_ms)
+                page.goto(redeem_url, wait_until="load", timeout=timeout_ms)
             except PWTimeout:
                 logger.error("[CRYPTO] page.goto timed out")
                 _save_debug(page, session_dir, "crypto_timeout")
