@@ -87,6 +87,12 @@ _STEALTH_JS = """
 _JS_CALL_API = """
 async ({payloadJson, endpoint, method}) => {
     try {
+        // xMidasToken: wait up to 15s for SPA to finish hydrating
+        let tokenWait = 0;
+        while ((!document.getElementById('xMidasToken')?.value) && tokenWait < 150) {
+            await new Promise(r => setTimeout(r, 100));
+            tokenWait++;
+        }
         const tokenEl = document.getElementById('xMidasToken');
         if (!tokenEl || !tokenEl.value) return {error: 'no_xmidas_token'};
 
@@ -94,6 +100,12 @@ async ({payloadJson, endpoint, method}) => {
         const versionEl  = document.getElementById('xMidasVersion');
         const ctoken_ver = (versionEl && versionEl.value) ? versionEl.value : '1.0.1';
 
+        // xMidas: wait up to 15s for the Chaos VM script to finish loading
+        let xmWait = 0;
+        while (typeof window.xMidas !== 'function' && xmWait < 150) {
+            await new Promise(r => setTimeout(r, 100));
+            xmWait++;
+        }
         if (typeof window.xMidas !== 'function') return {error: 'no_xmidas_function'};
 
         // Snapshot localStorage Forter data before calling xMidas (for debugging)
@@ -136,8 +148,13 @@ async ({payloadJson, endpoint, method}) => {
 """
 
 _JS_ENCRYPT_ONLY = """
-({payloadJson}) => {
+async ({payloadJson}) => {
     try {
+        let tokenWait = 0;
+        while ((!document.getElementById('xMidasToken')?.value) && tokenWait < 150) {
+            await new Promise(r => setTimeout(r, 100));
+            tokenWait++;
+        }
         const tokenEl   = document.getElementById('xMidasToken');
         const versionEl = document.getElementById('xMidasVersion');
         if (!tokenEl || !tokenEl.value) return {error: 'no_xmidas_token'};
@@ -145,6 +162,11 @@ _JS_ENCRYPT_ONLY = """
         const ctoken     = tokenEl.value;
         const ctoken_ver = (versionEl && versionEl.value) ? versionEl.value : '1.0.1';
 
+        let xmWait = 0;
+        while (typeof window.xMidas !== 'function' && xmWait < 150) {
+            await new Promise(r => setTimeout(r, 100));
+            xmWait++;
+        }
         if (typeof window.xMidas !== 'function') return {error: 'no_xmidas_function'};
 
         const hexResult = window.xMidas({d: payloadJson});
