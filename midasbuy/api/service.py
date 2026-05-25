@@ -132,46 +132,6 @@ async def _post(
         return None
 
 
-# ── Zone list (call first to discover PUBG Mobile server options) ─────────────
-
-async def get_zone_list(
-    storage_state_path: Optional[str] = None,
-    country_code: str = "bd",
-) -> list:
-    """
-    GET /interface/getAppSelectPf with {appid} → returns list of
-    {zoneid, name, pf} objects the player can select as their server.
-    """
-    if not storage_state_path:
-        return []
-
-    payload = {"appid": _APPID}
-    enc = await _get_browser_envelope(payload, storage_state_path, country_code)
-    if not enc:
-        return []
-
-    session_cookies = _load_cookies(storage_state_path)
-    if enc.get("ctoken"):
-        session_cookies["ctoken"] = enc["ctoken"]
-
-    referer = f"{_BASE}/midasbuy/{country_code}/redeem/pubgm"
-    url     = _BASE + "/interface/getAppSelectPf"
-    params  = {
-        "encrypt_msg": enc["encrypt_msg"],
-        "ctoken":      enc["ctoken"],
-        "ctoken_ver":  enc["ctoken_ver"],
-    }
-
-    data = await _get(url, params, session_cookies, referer)
-    if not data or data.get("ret") != 0:
-        logger.warning("[SERVICE] getAppSelectPf failed: %s", data)
-        return []
-
-    zones = (data.get("data") or {}).get("needSelectPF", {}).get("data", [])
-    logger.info("[SERVICE] zones returned: %s", zones)
-    return zones
-
-
 # ── Player lookup ─────────────────────────────────────────────────────────────
 
 async def get_player_info(
@@ -184,16 +144,12 @@ async def get_player_info(
     if not storage_state_path:
         return PlayerLookupResponse(success=False, error="No session. Please log in first.")
 
-    if not zone_id:
-        return PlayerLookupResponse(
-            success=False,
-            error="zone_id is required. Call /api/zones first to get the server list.",
-        )
-
     payload = {
-        "openid":  player_id,
-        "appid":   _APPID,
-        "zone_id": zone_id,
+        "roleId":  player_id,
+        "appId":   _APPID,
+        "game":    "pubgm",
+        "pf":      _PF,
+        "country": country_code.upper(),
     }
 
     enc = await _get_browser_envelope(payload, storage_state_path, country_code)
@@ -205,15 +161,15 @@ async def get_player_info(
         session_cookies["ctoken"] = enc["ctoken"]
 
     referer = f"{_BASE}/midasbuy/{country_code}/redeem/pubgm"
-    url     = _BASE + "/interface/getCharacByOpenid"
-    params  = {
+    url     = _BASE + "/interface/getCharac"
+    body    = {
         "encrypt_msg": enc["encrypt_msg"],
         "ctoken":      enc["ctoken"],
         "ctoken_ver":  enc["ctoken_ver"],
     }
 
-    logger.info("[SERVICE] GET %s  ctoken_prefix=%s  zone_id=%s", url, enc["ctoken"][:20], zone_id)
-    data = await _get(url, params, session_cookies, referer)
+    logger.info("[SERVICE] POST %s  ctoken_prefix=%s", url, enc["ctoken"][:20])
+    data = await _post(url, body, session_cookies, referer)
 
     if data is None:
         return PlayerLookupResponse(success=False, error="API request failed. Check logs.")
@@ -224,15 +180,15 @@ async def get_player_info(
             error=data.get("msg") or f"API error ret={data.get('ret')}",
         )
 
-    role = data.get("data", {})
+    info = data.get("info", {})
     return PlayerLookupResponse(
         success=True,
         player=PlayerInfo(
             player_id=player_id,
-            username=role.get("charac_name") or role.get("roleName") or "",
-            role_id=str(role.get("openid") or role.get("roleId") or player_id),
-            server_id=str(role.get("pf") or ""),
-            zone_id=str(role.get("zoneid") or zone_id),
+            username=info.get("charac_name") or "",
+            role_id=str(info.get("openid") or player_id),
+            server_id="",
+            zone_id=str(info.get("zoneid") or ""),
         ),
     )
 
