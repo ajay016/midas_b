@@ -102,6 +102,7 @@ async ({payloadJson, endpoint, method}) => {
 
         const bytes       = (hexResult.match(/../g) || []).map(h => parseInt(h, 16));
         const encrypt_msg = btoa(String.fromCharCode(...bytes));
+        const enc_len     = encrypt_msg.length;
 
         const resp = await fetch('https://www.midasbuy.com' + endpoint, {
             method:      method || 'POST',
@@ -113,9 +114,15 @@ async ({payloadJson, endpoint, method}) => {
         const text = await resp.text();
         let data;
         try { data = JSON.parse(text); }
-        catch(e) { return {error: 'invalid_json', status: resp.status, text: text.substring(0, 500)}; }
-
-        return {ok: true, status: resp.status, data, encrypt_msg_len: encrypt_msg.length};
+        catch(e) {
+            const hdrs = {};
+            for (const [k, v] of resp.headers.entries()) hdrs[k] = v;
+            return {error: 'invalid_json', status: resp.status,
+                    encrypt_msg_len: enc_len,
+                    text: text.substring(0, 300),
+                    response_headers: hdrs};
+        }
+        return {ok: true, status: resp.status, data, encrypt_msg_len: enc_len};
     } catch(e) {
         return {error: 'js_exception', detail: String(e), stack: (e.stack || '').substring(0, 500)};
     }
@@ -164,6 +171,41 @@ def _load_session_storage(storage_state_path: str) -> dict:
         return {}
 
 
+def _load_manual_blackbox(storage_state_path: str) -> str:
+    """
+    Load a manually saved Forter blackbox-selection value.
+
+    The Forter SDK refuses to generate this in any Playwright context (headless
+    or headed) because it uses timing-based CDP detection.  The only reliable
+    fix is to capture the value from a real Chrome session and save it here.
+
+    How to get the value:
+      1. Open https://www.midasbuy.com/midasbuy/bd/redeem/pubgm in Chrome
+      2. DevTools → Application → Session Storage → https://www.midasbuy.com
+      3. Find the 'blackbox-selection' row, copy the value
+      4. Save it to: <session_dir>/blackbox_selection.txt
+
+    The value is device-specific and stays valid for days to weeks.
+    """
+    path = os.path.join(os.path.dirname(storage_state_path), "blackbox_selection.txt")
+    if not os.path.exists(path):
+        logger.warning(
+            "[CRYPTO] blackbox_selection.txt not found at %s — "
+            "encrypt_msg will be small and the server will return 500.  "
+            "See the docstring above for how to create this file.", path
+        )
+        return ""
+    try:
+        value = open(path, encoding="utf-8").read().strip()
+        if value:
+            logger.info("[CRYPTO] loaded manual blackbox-selection  len=%d", len(value))
+            return value
+        logger.warning("[CRYPTO] blackbox_selection.txt is empty")
+    except Exception as e:
+        logger.warning("[CRYPTO] could not read blackbox_selection.txt: %s", e)
+    return ""
+
+
 def _launch_context(p, storage_state_path: str):
     """
     Launch a headed browser (headless=False) so the Forter SDK gets real
@@ -207,6 +249,19 @@ def _launch_context(p, storage_state_path: str):
             }})();
         """)
         logger.info("[CRYPTO] pre-injecting %d sessionStorage keys", len(ss_data))
+
+    # Inject manually saved Forter blackbox — overrides any auto-generated (empty) value.
+    # This is the primary fix: Forter's CDP-timing detection blocks automatic generation
+    # in every Playwright context, so we supply a real browser's value here.
+    manual_blackbox = _load_manual_blackbox(storage_state_path)
+    if manual_blackbox:
+        context.add_init_script(f"""
+            (() => {{
+                try {{ sessionStorage.setItem('blackbox-selection', {json.dumps(manual_blackbox)}); }}
+                catch(e) {{}}
+            }})();
+        """)
+        logger.info("[CRYPTO] injected manual blackbox-selection")
 
     return browser, context
 
@@ -329,6 +384,12 @@ def call_api_in_browser(
 
             logger.info("[CRYPTO] page loaded  url=%s", page.url)
 
+            # Let all async SDKs (Forter, iovation, etc.) finish initializing
+            try:
+                page.wait_for_load_state("networkidle", timeout=15_000)
+            except Exception:
+                pass  # networkidle timeout is fine, continue anyway
+
             if not _wait_for_xmidas(page, session_dir, timeout_ms):
                 browser.close()
                 return None
@@ -350,7 +411,15 @@ def call_api_in_browser(
                 return None
 
             if result.get("error"):
-                logger.error("[CRYPTO] JS/fetch error: %s", result)
+                logger.error(
+                    "[CRYPTO] JS/fetch error  error=%s  status=%s  "
+                    "encrypt_msg_len=%s  response_headers=%s  text=%.200s",
+                    result.get("error"),
+                    result.get("status"),
+                    result.get("encrypt_msg_len", "?"),
+                    result.get("response_headers", {}),
+                    result.get("text", ""),
+                )
                 return None
 
             logger.info(
