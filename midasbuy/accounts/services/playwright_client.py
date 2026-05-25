@@ -1,6 +1,10 @@
 import logging
 from django.conf import settings
-from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
+
+try:
+    from patchright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
+except ImportError:
+    from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 
 from accounts.utils import (
     get_cookie_file_path,

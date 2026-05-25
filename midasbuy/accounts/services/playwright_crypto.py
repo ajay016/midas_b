@@ -1,16 +1,21 @@
 """
 Makes Midasbuy API calls from inside a live browser session.
 
-WHY headed mode (headless=False):
-  The Tencent Chaos VM reads Forter's blackbox-selection from sessionStorage
-  and WebGL/canvas data at encryption time.  In headless Playwright these are
-  absent or blank — the Forter SDK detects headless mode and never writes
-  blackbox-selection → Chaos VM produces only ~216-char encrypt_msg (missing
-  ~900 bytes of fingerprint) → server returns HTTP 500.
+Root cause of HTTP 500:
+  The Tencent Chaos VM reads Forter's device tokens (forterToken, feh--* keys)
+  from localStorage when encrypting.  Standard Playwright is detected as a
+  bot by Forter via CDP timing analysis, so it never writes those tokens.
+  Result: Chaos VM produces only ~216-char encrypt_msg; server rejects it.
 
-  With headless=False the browser has a real GPU-backed rendering pipeline.
-  Forter generates a proper blackbox, Chaos VM produces ~1456-char encrypt_msg,
-  and the server accepts it.  --start-minimized keeps the window off-screen.
+Fix: use patchright (drop-in Playwright replacement that removes all CDP
+  detection markers).  With patchright, Forter SDK runs normally, writes
+  forterToken + feh--* to localStorage during the login session, those values
+  are saved in storage_state.json, and every subsequent call produces the
+  expected ~1456-char encrypt_msg.
+
+Install once:
+  pip install patchright
+  patchright install chromium
 """
 import json
 import logging
@@ -19,69 +24,65 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-# ── Stealth init script ───────────────────────────────────────────────────────
-# Applied to every new context to prevent bot-detection by the Forter SDK.
+
+def _get_playwright():
+    """Prefer patchright (undetected); fall back to standard playwright."""
+    try:
+        from patchright.sync_api import sync_playwright, TimeoutError as PWTimeout
+        logger.debug("[CRYPTO] using patchright")
+        return sync_playwright, PWTimeout
+    except ImportError:
+        from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
+        logger.warning(
+            "[CRYPTO] patchright not installed — Forter SDK will be blocked by CDP "
+            "detection and forterToken won't be written → encrypt_msg will be ~216 chars "
+            "→ server will return 500.  Fix: pip install patchright && patchright install chromium"
+        )
+        return sync_playwright, PWTimeout
+
+
+# ── Stealth init script (belt-and-suspenders on top of patchright) ────────────
 _STEALTH_JS = """
 (() => {
-    // webdriver
-    Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+    try { Object.defineProperty(navigator, 'webdriver', { get: () => undefined }); } catch(e) {}
 
-    // window.chrome — its absence is the #1 headless tell
     if (!window.chrome) {
-        Object.defineProperty(window, 'chrome', {
-            writable: true, enumerable: true, configurable: false,
-            value: {
-                app: {
-                    isInstalled: false,
-                    InstallState: { DISABLED:'disabled', INSTALLED:'installed', NOT_INSTALLED:'not_installed' },
-                    RunningState: { CANNOT_RUN:'cannot_run', READY_TO_RUN:'ready_to_run', RUNNING:'running' },
-                    getDetails: function(){}, getIsInstalled: function(){ return false; },
-                    installState: function(){}, runningState: function(){ return 'cannot_run'; },
+        try {
+            Object.defineProperty(window, 'chrome', {
+                writable: true, enumerable: true, configurable: false,
+                value: {
+                    app: { isInstalled: false, getDetails(){}, getIsInstalled(){ return false; },
+                           installState(){}, runningState(){ return 'cannot_run'; } },
+                    csi(){}, loadTimes(){ return {}; }, runtime: {},
                 },
-                csi: function(){},
-                loadTimes: function(){ return {}; },
-                runtime: {},
-            },
-        });
+            });
+        } catch(e) {}
     }
 
-    // plugins — empty array is a headless tell
     try {
         if (!navigator.plugins || navigator.plugins.length === 0) {
-            const mk = (n, f) => ({ name: n, filename: f, description: 'Portable Document Format',
-                length: 1, 0: { type: 'application/pdf', suffixes: 'pdf', description: '' } });
-            const list = [
-                mk('PDF Viewer', 'internal-pdf-viewer'),
-                mk('Chrome PDF Viewer', 'internal-pdf-viewer'),
-                mk('Chromium PDF Viewer', 'internal-pdf-viewer'),
-            ];
-            Object.defineProperty(navigator, 'plugins', { get: () => list, enumerable: true });
+            const mk = (n, f) => ({ name: n, filename: f,
+                description: 'Portable Document Format', length: 1,
+                0: { type: 'application/pdf', suffixes: 'pdf', description: '' } });
+            Object.defineProperty(navigator, 'plugins', {
+                get: () => [mk('PDF Viewer','internal-pdf-viewer'),
+                            mk('Chrome PDF Viewer','internal-pdf-viewer'),
+                            mk('Chromium PDF Viewer','internal-pdf-viewer')],
+                enumerable: true,
+            });
         }
     } catch(e) {}
 
-    // languages / platform / concurrency
-    try { Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] }); } catch(e) {}
+    try { Object.defineProperty(navigator, 'languages', { get: () => ['en-US','en'] }); } catch(e) {}
     try { Object.defineProperty(navigator, 'platform',  { get: () => 'Win32' }); } catch(e) {}
     try {
         if (!navigator.hardwareConcurrency || navigator.hardwareConcurrency < 2)
             Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 8 });
     } catch(e) {}
-
-    // Permissions API — headless has different behaviour
-    try {
-        const origQuery = window.Permissions && window.Permissions.prototype.query;
-        if (origQuery) {
-            window.Permissions.prototype.query = function(p) {
-                if (p && p.name === 'notifications')
-                    return Promise.resolve({ state: Notification.permission });
-                return origQuery.call(this, p);
-            };
-        }
-    } catch(e) {}
 })();
 """
 
-# ── JS snippets evaluated inside the page ────────────────────────────────────
+# ── JS evaluated inside the page ──────────────────────────────────────────────
 
 _JS_CALL_API = """
 async ({payloadJson, endpoint, method}) => {
@@ -94,6 +95,10 @@ async ({payloadJson, endpoint, method}) => {
         const ctoken_ver = (versionEl && versionEl.value) ? versionEl.value : '1.0.1';
 
         if (typeof window.xMidas !== 'function') return {error: 'no_xmidas_function'};
+
+        // Snapshot localStorage Forter data before calling xMidas (for debugging)
+        const ftPresent  = !!localStorage.getItem('forterToken');
+        const fehCount   = Object.keys(localStorage).filter(k => k.startsWith('feh--')).length;
 
         const hexResult = window.xMidas({d: payloadJson});
         if (!hexResult || typeof hexResult !== 'string' || hexResult.length === 0)
@@ -115,15 +120,17 @@ async ({payloadJson, endpoint, method}) => {
         try { data = JSON.parse(text); }
         catch(e) {
             const hdrs = {};
-            for (const [k, v] of resp.headers.entries()) hdrs[k] = v;
+            for (const [k,v] of resp.headers.entries()) hdrs[k] = v;
             return {error: 'invalid_json', status: resp.status,
                     encrypt_msg_len: enc_len,
-                    text: text.substring(0, 300),
-                    response_headers: hdrs};
+                    forter_token_present: ftPresent, feh_count: fehCount,
+                    response_headers: hdrs, text: text.substring(0, 300)};
         }
-        return {ok: true, status: resp.status, data, encrypt_msg_len: enc_len};
+        return {ok: true, status: resp.status, data,
+                encrypt_msg_len: enc_len,
+                forter_token_present: ftPresent, feh_count: fehCount};
     } catch(e) {
-        return {error: 'js_exception', detail: String(e), stack: (e.stack || '').substring(0, 500)};
+        return {error: 'js_exception', detail: String(e), stack: (e.stack||'').substring(0,500)};
     }
 }
 """
@@ -142,13 +149,13 @@ _JS_ENCRYPT_ONLY = """
 
         const hexResult = window.xMidas({d: payloadJson});
         if (!hexResult || typeof hexResult !== 'string' || hexResult.length === 0)
-            return {error: 'xmidas_empty', got: JSON.stringify(hexResult)};
+            return {error: 'xmidas_empty'};
 
         const bytes       = (hexResult.match(/../g) || []).map(h => parseInt(h, 16));
         const encrypt_msg = btoa(String.fromCharCode(...bytes));
         return {ok: true, ctoken, ctoken_ver, encrypt_msg};
     } catch(e) {
-        return {error: 'js_exception', detail: String(e), stack: (e.stack || '').substring(0, 500)};
+        return {error: 'js_exception', detail: String(e)};
     }
 }
 """
@@ -170,57 +177,43 @@ def _load_session_storage(storage_state_path: str) -> dict:
         return {}
 
 
-def _load_manual_blackbox(storage_state_path: str) -> str:
-    """
-    Load a manually saved Forter blackbox-selection value.
-
-    The Forter SDK refuses to generate this in any Playwright context (headless
-    or headed) because it uses timing-based CDP detection.  The only reliable
-    fix is to capture the value from a real Chrome session and save it here.
-
-    How to get the value:
-      1. Open https://www.midasbuy.com/midasbuy/bd/redeem/pubgm in Chrome
-      2. DevTools → Application → Session Storage → https://www.midasbuy.com
-      3. Find the 'blackbox-selection' row, copy the value
-      4. Save it to: <session_dir>/blackbox_selection.txt
-
-    The value is device-specific and stays valid for days to weeks.
-    """
-    path = os.path.join(os.path.dirname(storage_state_path), "blackbox_selection.txt")
-    if not os.path.exists(path):
-        logger.warning(
-            "[CRYPTO] blackbox_selection.txt not found at %s — "
-            "encrypt_msg will be small and the server will return 500.  "
-            "See the docstring above for how to create this file.", path
-        )
-        return ""
+def _log_storage_state_locals(storage_state_path: str) -> None:
+    """Log localStorage contents from storage_state to verify Forter data is present."""
     try:
-        value = open(path, encoding="utf-8").read().strip()
-        if value:
-            logger.info("[CRYPTO] loaded manual blackbox-selection  len=%d", len(value))
-            return value
-        logger.warning("[CRYPTO] blackbox_selection.txt is empty")
+        with open(storage_state_path, encoding="utf-8") as f:
+            ss = json.load(f)
+        for origin in ss.get("origins", []):
+            ls_items = origin.get("localStorage", [])
+            if not ls_items:
+                continue
+            keys = [item["name"] for item in ls_items]
+            forter_keys = [k for k in keys if k.startswith("feh--") or k == "forterToken"]
+            logger.info(
+                "[CRYPTO] storage_state localStorage  origin=%s  total=%d  forter_keys=%s",
+                origin.get("origin"), len(ls_items), forter_keys,
+            )
+        if not any(o.get("localStorage") for o in ss.get("origins", [])):
+            logger.warning(
+                "[CRYPTO] storage_state has NO localStorage data — "
+                "Forter SDK did not run during login. "
+                "Install patchright so it writes forterToken during login: "
+                "pip install patchright && patchright install chromium"
+            )
     except Exception as e:
-        logger.warning("[CRYPTO] could not read blackbox_selection.txt: %s", e)
-    return ""
+        logger.debug("[CRYPTO] could not inspect storage_state: %s", e)
 
 
 def _launch_context(p, storage_state_path: str):
-    """
-    Launch a headed browser (headless=False) so the Forter SDK gets real
-    GPU/canvas/WebGL data and generates a valid blackbox-selection.
-    --start-minimized keeps the window invisible on Windows.
-    """
+    """Launch headless browser. With patchright, Forter SDK runs undetected."""
     ss_data = _load_session_storage(storage_state_path)
+    _log_storage_state_locals(storage_state_path)
 
     browser = p.chromium.launch(
-        headless=False,           # MUST be False — headless blocks Forter SDK
+        headless=True,
         args=[
             "--no-sandbox",
+            "--disable-dev-shm-usage",
             "--disable-blink-features=AutomationControlled",
-            "--start-minimized",  # Window opens minimized (off-screen on Windows)
-            "--window-size=1440,900",
-            "--disable-infobars",
         ],
     )
 
@@ -229,44 +222,30 @@ def _launch_context(p, storage_state_path: str):
         viewport={"width": 1440, "height": 900},
         locale="en-US",
         timezone_id="America/New_York",
-        # No user_agent override: let Playwright use the natural UA so it matches
-        # the auto-generated sec-ch-ua header (mismatch is a bot signal).
     )
 
-    # Stealth patches — prevent headless detection by Forter SDK
     context.add_init_script(_STEALTH_JS)
 
-    # Pre-load any previously saved sessionStorage (best-effort)
     if ss_data:
         ss_json = json.dumps(ss_data)
         context.add_init_script(f"""
             (() => {{
                 const data = {ss_json};
-                for (const [k, v] of Object.entries(data)) {{
+                for (const [k,v] of Object.entries(data)) {{
                     try {{ sessionStorage.setItem(k, v); }} catch(e) {{}}
                 }}
             }})();
         """)
-        logger.info("[CRYPTO] pre-injecting %d sessionStorage keys", len(ss_data))
-
-    # Inject manually saved Forter blackbox — overrides any auto-generated (empty) value.
-    # This is the primary fix: Forter's CDP-timing detection blocks automatic generation
-    # in every Playwright context, so we supply a real browser's value here.
-    manual_blackbox = _load_manual_blackbox(storage_state_path)
-    if manual_blackbox:
-        context.add_init_script(f"""
-            (() => {{
-                try {{ sessionStorage.setItem('blackbox-selection', {json.dumps(manual_blackbox)}); }}
-                catch(e) {{}}
-            }})();
-        """)
-        logger.info("[CRYPTO] injected manual blackbox-selection")
 
     return browser, context
 
 
 def _wait_for_xmidas(page, session_dir: str, timeout_ms: int) -> bool:
     from playwright.sync_api import TimeoutError as PWTimeout
+    try:
+        from patchright.sync_api import TimeoutError as PWTimeout
+    except ImportError:
+        pass
 
     try:
         page.wait_for_function(
@@ -288,18 +267,20 @@ def _wait_for_xmidas(page, session_dir: str, timeout_ms: int) -> bool:
     except PWTimeout:
         logger.warning("[CRYPTO] window.xMidas not ready — trying anyway")
 
-    # Log whether the injected blackbox is present
+    # Log whether Forter wrote its tokens (tells us if patchright is working)
     try:
-        blen = page.evaluate(
-            "() => (window.sessionStorage.getItem('blackbox-selection') || '').length"
-        )
-        if blen:
-            logger.info("[CRYPTO] blackbox-selection present  len=%d", blen)
+        info = page.evaluate("""
+            () => ({
+                forterToken: !!localStorage.getItem('forterToken'),
+                fehCount:    Object.keys(localStorage).filter(k => k.startsWith('feh--')).length,
+            })
+        """)
+        if info.get("forterToken"):
+            logger.info("[CRYPTO] Forter localStorage ready  feh_count=%d", info.get("fehCount", 0))
         else:
             logger.warning(
-                "[CRYPTO] blackbox-selection is empty — "
-                "create midasbuy_sessions/account_<N>/blackbox_selection.txt "
-                "with the value from Chrome DevTools → Application → Session Storage"
+                "[CRYPTO] forterToken missing from localStorage  "
+                "(patchright not active? run: pip install patchright && patchright install chromium)"
             )
     except Exception:
         pass
@@ -318,16 +299,10 @@ def call_api_in_browser(
     timeout_ms: int = 60_000,
 ) -> Optional[dict]:
     """
-    Navigate to the Midasbuy redeem page, then execute window.xMidas AND
-    fetch() entirely inside the browser tab.
-
-    Returns the parsed JSON response dict, or None on failure.
+    Navigate to the Midasbuy redeem page, run window.xMidas and fetch()
+    entirely inside the browser, return the parsed JSON response.
     """
-    try:
-        from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
-    except ImportError:
-        logger.error("[CRYPTO] Playwright not installed")
-        return None
+    sync_playwright, PWTimeout = _get_playwright()
 
     redeem_url  = f"https://www.midasbuy.com/midasbuy/{country_code}/redeem/pubgm"
     session_dir = os.path.dirname(storage_state_path)
@@ -370,20 +345,23 @@ def call_api_in_browser(
 
             if result.get("error"):
                 logger.error(
-                    "[CRYPTO] JS/fetch error  error=%s  status=%s  "
-                    "encrypt_msg_len=%s  response_headers=%s  text=%.200s",
+                    "[CRYPTO] fetch failed  error=%s  status=%s  "
+                    "encrypt_msg_len=%s  forter_token=%s  feh_count=%s",
                     result.get("error"),
                     result.get("status"),
                     result.get("encrypt_msg_len", "?"),
-                    result.get("response_headers", {}),
-                    result.get("text", ""),
+                    result.get("forter_token_present"),
+                    result.get("feh_count"),
                 )
                 return None
 
             logger.info(
-                "[CRYPTO] browser fetch ok  status=%s  encrypt_msg_len=%s",
+                "[CRYPTO] ok  status=%s  encrypt_msg_len=%s  "
+                "forter_token=%s  feh_count=%s",
                 result.get("status"),
                 result.get("encrypt_msg_len"),
+                result.get("forter_token_present"),
+                result.get("feh_count"),
             )
             return result.get("data")
 
@@ -398,17 +376,8 @@ def get_browser_payload(
     country_code: str = "bd",
     timeout_ms: int = 45_000,
 ) -> Optional[dict]:
-    """
-    Navigate to the Midasbuy redeem page, call window.xMidas, and return
-    {encrypt_msg, ctoken, ctoken_ver, fresh_cookies}.
-
-    Prefer call_api_in_browser() when you also need to make the HTTP request.
-    """
-    try:
-        from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
-    except ImportError:
-        logger.error("[CRYPTO] Playwright not installed")
-        return None
+    """Return {encrypt_msg, ctoken, ctoken_ver, fresh_cookies} or None."""
+    sync_playwright, PWTimeout = _get_playwright()
 
     redeem_url  = f"https://www.midasbuy.com/midasbuy/{country_code}/redeem/pubgm"
     session_dir = os.path.dirname(storage_state_path)
@@ -426,8 +395,6 @@ def get_browser_payload(
                 _save_debug(page, session_dir, "crypto_timeout")
                 browser.close()
                 return None
-
-            logger.info("[CRYPTO] page loaded  url=%s", page.url)
 
             if not _wait_for_xmidas(page, session_dir, timeout_ms):
                 browser.close()
