@@ -1,17 +1,17 @@
 """
 Midasbuy API service.
 
-All requests are made from *inside* the Playwright browser tab via
-call_api_in_browser().  The browser's native window.xMidas SDK generates
-a fully fingerprinted encrypt_msg (~1456 chars), and fetch(credentials:'include')
-handles cookies + sec-* headers automatically.
+Primary path: pure Python AES-256-CBC encryption using values captured
+during login (xmidas_token.txt + page_data.json), sent via httpx.
+This avoids the browser entirely and the window.xMidas race condition.
 
-Using httpx to send Playwright-generated encrypt_msg fails (HTTP 500) because
-headless Playwright produces only ~216-char output — the Tencent Chaos VM
-omits Forter/device-signal data that the server validates.
+Fallback: Playwright browser tab (call_api_in_browser) for cases where
+page_data.json or xmidas_token.txt are missing from the session.
 """
 import asyncio
+import json
 import logging
+import os
 from typing import Optional
 
 from .schemas import PlayerInfo, PlayerLookupResponse, RedeemResponse
@@ -22,7 +22,7 @@ _APPID = "1900000047"
 _PF    = "mds_pc_browser-yy-android-midasweb-midasbuy-self.midasbuy_saas"
 
 
-async def _browser_call(
+async def _api_call(
     payload: dict,
     endpoint: str,
     storage_state_path: Optional[str],
@@ -31,14 +31,43 @@ async def _browser_call(
 ) -> Optional[dict]:
     if not storage_state_path:
         return None
+
+    session_dir = os.path.dirname(storage_state_path)
+
+    # ── Primary: pure Python encryption (no browser spin-up) ──────────────────
+    xmidas_token_path = os.path.join(session_dir, "xmidas_token.txt")
+    page_data_path    = os.path.join(session_dir, "page_data.json")
+
+    if os.path.exists(xmidas_token_path):
+        try:
+            with open(xmidas_token_path, encoding="utf-8") as f:
+                xmidas_token = f.read().strip()
+
+            page_data: dict = {}
+            if os.path.exists(page_data_path):
+                with open(page_data_path, encoding="utf-8") as f:
+                    page_data = json.load(f)
+
+            if xmidas_token:
+                from .crypto.crypto import call_api_python
+                result = await asyncio.to_thread(
+                    call_api_python,
+                    payload, endpoint, storage_state_path,
+                    country_code, xmidas_token, page_data,
+                )
+                if result is not None:
+                    logger.info("[SERVICE] python-crypto ok  ret=%s", result.get("ret"))
+                    return result
+                logger.warning("[SERVICE] python-crypto returned None — falling back to browser")
+        except Exception as exc:
+            logger.warning("[SERVICE] python-crypto failed (%s) — falling back to browser", exc)
+
+    # ── Fallback: browser-based fetch ─────────────────────────────────────────
+    logger.info("[SERVICE] using browser fallback  endpoint=%s", endpoint)
     from accounts.services.playwright_crypto import call_api_in_browser
     return await asyncio.to_thread(
         call_api_in_browser,
-        payload,
-        endpoint,
-        storage_state_path,
-        country_code,
-        method,
+        payload, endpoint, storage_state_path, country_code, method,
     )
 
 
@@ -62,7 +91,7 @@ async def get_player_info(
         "country": country_code.upper(),
     }
 
-    data = await _browser_call(payload, "/interface/getCharac", storage_state_path, country_code)
+    data = await _api_call(payload, "/interface/getCharac", storage_state_path, country_code)
 
     if data is None:
         return PlayerLookupResponse(success=False, error="API request failed. Check logs.")
@@ -108,7 +137,7 @@ async def query_code_info(
         "channel": "MIDASBUY_REDEEM",
     }
 
-    data = await _browser_call(
+    data = await _api_call(
         payload,
         "/interface/shelfProto/shelves_svr/QueryRedeemCodeInfo",
         storage_state_path,
@@ -155,7 +184,7 @@ async def submit_redeem(
         "channelId": "MIDASBUY_REDEEM",
     }
 
-    data = await _browser_call(
+    data = await _api_call(
         payload,
         "/interface/shelfProto/shelves_svr/RedeemCode",
         storage_state_path,

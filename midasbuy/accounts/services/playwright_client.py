@@ -10,6 +10,7 @@ from accounts.utils import (
     get_cookie_file_path,
     get_html_snapshot_file_path,
     get_meta_file_path,
+    get_page_data_file_path,
     get_screenshot_file_path,
     get_session_storage_file_path,
     get_storage_state_file_path,
@@ -32,6 +33,7 @@ def run_browser_login_session(account, session_dir: str) -> dict:
     cookie_path           = get_cookie_file_path(session_dir)
     token_path            = get_token_file_path(session_dir)
     xmidas_token_path     = get_xmidas_token_file_path(session_dir)
+    page_data_path        = get_page_data_file_path(session_dir)
     meta_path             = get_meta_file_path(session_dir)
 
     base_url = getattr(
@@ -148,6 +150,27 @@ def run_browser_login_session(account, session_dir: str) -> dict:
                         logger.info("[MIDASBUY] sessionStorage saved: %d keys", len(ss_data))
                     except Exception as e:
                         logger.warning("[MIDASBUY] Failed to capture sessionStorage: %s", e)
+
+                    # Capture publicParams values for pure Python encryption
+                    try:
+                        page_data = page.evaluate("""
+                            () => ({
+                                midasbuyDeviceId: (window.__Report_INFO || {}).midasbuyDeviceId || '',
+                                midasuid:         (window.__Report_INFO || {}).midasuid         || '',
+                                uuidCookie:       (document.cookie.match(/UUID=([^;]*)/) || [,''])[1],
+                                appid:            (window.SERVER_DATA || {}).appid            || '1900000047',
+                                country:          (window.SERVER_DATA || {}).country          || 'bd',
+                                midasbuyArea:     (window.SERVER_DATA || {}).midasbuyArea     || '',
+                                currency_type:    (window.SERVER_DATA || {}).currency_type    || 'USD',
+                                zoneid:           String((window.SERVER_DATA || {}).zoneid    || '1'),
+                            })
+                        """)
+                        save_json_file(page_data_path, page_data)
+                        logger.info("[MIDASBUY] page_data saved: device=%s muid=%s",
+                                    page_data.get("midasbuyDeviceId", "")[:12],
+                                    page_data.get("midasuid", ""))
+                    except Exception as e:
+                        logger.warning("[MIDASBUY] Failed to capture page_data: %s", e)
 
                 except Exception as e:
                     logger.warning("[MIDASBUY] Failed to capture xMidasToken: %s", e)

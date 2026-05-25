@@ -33,20 +33,28 @@ _CHAOS_VM_LOCAL_PATH = os.path.normpath(
     )
 )
 
-# Appended synchronously to the Chaos VM after it executes.
-# Runs before any SPA hydration task — locks window.xMidas so React cannot delete it.
+# Appended to the Chaos VM script (served via page.route).
+# Tries to lock window.xMidas immediately; if the VM assigned it async,
+# falls back to a 10ms poll so we catch it before SPA hydration deletes it.
 _CHAOS_VM_PROTECTION = b"""
 ;(function(){
+    function _lock(fn) {
+        try {
+            Object.defineProperty(window, 'xMidas', {
+                get: function() { return fn; },
+                set: function() {},
+                configurable: false,
+                enumerable: true,
+            });
+        } catch(e) {}
+    }
     var _fn = window.xMidas;
-    if (typeof _fn !== 'function') return;
-    try {
-        Object.defineProperty(window, 'xMidas', {
-            get: function() { return _fn; },
-            set: function() {},
-            configurable: false,
-            enumerable: true,
-        });
-    } catch(e) {}
+    if (typeof _fn === 'function') { _lock(_fn); return; }
+    var _t = setInterval(function() {
+        var f = window.xMidas;
+        if (typeof f === 'function') { clearInterval(_t); _lock(f); }
+    }, 10);
+    setTimeout(function() { clearInterval(_t); }, 30000);
 })();
 """
 
@@ -100,6 +108,33 @@ _STEALTH_JS = """
     try {
         if (!navigator.hardwareConcurrency || navigator.hardwareConcurrency < 2)
             Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 8 });
+    } catch(e) {}
+
+    // Pre-intercept window.xMidas with a capturing setter so the Chaos VM's
+    // synchronous assignment is caught before SPA hydration can delete it.
+    // Works if this init script runs in the main JS world (standard Playwright
+    // behaviour). The configurable:false lock prevents any subsequent deletion.
+    try {
+        var _xMidasFn = null;
+        Object.defineProperty(window, 'xMidas', {
+            get: function() { return _xMidasFn; },
+            set: function(v) {
+                if (typeof v === 'function' && _xMidasFn === null) {
+                    _xMidasFn = v;
+                    // Re-lock as non-configurable so the SPA cannot delete it
+                    try {
+                        Object.defineProperty(window, 'xMidas', {
+                            get: function() { return _xMidasFn; },
+                            set: function() {},
+                            configurable: false,
+                            enumerable: true,
+                        });
+                    } catch(e) {}
+                }
+            },
+            configurable: true,
+            enumerable: true,
+        });
     } catch(e) {}
 })();
 """
