@@ -10,7 +10,10 @@ class RedeemRequest(BaseModel):
     player_id:    str = Field(..., description="PUBG Mobile player UID")
     pin_code:     str = Field(..., description="UC redeem pin code")
     country_code: str = Field("bd", description="ISO country code")
+    zone_id:      str = Field("1", description="Player zone ID returned by lookup")
     account_id:   int | None = Field(None, description="MidasbuyAccount ID to use")
+    rc_token:     str | None = Field(None, description="Risk-control verification token")
+    rc_uuid:      str | None = Field(None, description="Risk-control verification UUID")
 
 
 class PlayerInfo(BaseModel):
@@ -28,6 +31,9 @@ class PlayerLookupResponse(BaseModel):
 
 
 class RedeemResponse(BaseModel):
-    success: bool
-    message: str
-    raw:     dict | None = None
+    success:               bool
+    message:               str
+    verification_required: bool = False
+    challenge_url:         str | None = None
+    risk_sdk_url:          str | None = None
+    raw:                   dict | None = None

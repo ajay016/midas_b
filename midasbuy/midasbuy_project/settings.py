@@ -9,7 +9,11 @@ DEBUG = True
 ALLOWED_HOSTS = ["*"]
 
 INSTALLED_APPS = [
+    "django.contrib.admin",
+    "django.contrib.auth",
     "django.contrib.contenttypes",
+    "django.contrib.sessions",
+    "django.contrib.messages",
     "django.contrib.staticfiles",
     "accounts",
     "redeem",
@@ -17,8 +21,11 @@ INSTALLED_APPS = [
 
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
+    "django.contrib.sessions.middleware.SessionMiddleware",
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
+    "django.contrib.auth.middleware.AuthenticationMiddleware",
+    "django.contrib.messages.middleware.MessageMiddleware",
 ]
 
 ROOT_URLCONF = "midasbuy_project.urls"
@@ -32,6 +39,8 @@ TEMPLATES = [
             "context_processors": [
                 "django.template.context_processors.request",
                 "django.template.context_processors.csrf",
+                "django.contrib.auth.context_processors.auth",
+                "django.contrib.messages.context_processors.messages",
             ],
         },
     },
@@ -47,6 +56,7 @@ DATABASES = {
 }
 
 STATIC_URL = "/static/"
+STATIC_ROOT = BASE_DIR / "staticfiles"
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
@@ -70,15 +80,13 @@ LOGGING = {
     },
     "loggers": {
         "accounts": {"level": "DEBUG", "handlers": ["console"], "propagate": False},
+        "api": {"level": "DEBUG", "handlers": ["console"], "propagate": False},
     },
 }
 
 # Midasbuy browser settings
 MIDASBUY_BROWSER_HEADLESS = False
-MIDASBUY_BROWSER_USER_AGENT = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/120.0.0.0 Safari/537.36"
-)
+MIDASBUY_CRYPTO_BROWSER_HEADLESS = True
+MIDASBUY_BROWSER_USER_AGENT = ""
 MIDASBUY_BROWSER_VIEWPORT = {"width": 1440, "height": 900}
 MIDASBUY_LOGIN_BASE_URL = "https://www.midasbuy.com/midasbuy"

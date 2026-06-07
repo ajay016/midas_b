@@ -15,6 +15,12 @@ logger = logging.getLogger(__name__)
 api_app = FastAPI(title="Midasbuy Redeem API", version="2.0.0")
 
 
+@api_app.on_event("shutdown")
+async def shutdown_browser_cache():
+    from .service import shutdown_browser_worker
+    await shutdown_browser_worker()
+
+
 def _resolve_session_sync(account_id: int) -> tuple[str | None, str | None]:
     """Sync helper — must be called via sync_to_async from async endpoints."""
     from accounts.models import MidasbuyAccount
@@ -80,4 +86,13 @@ async def player_info(
 @api_app.post("/redeem", response_model=RedeemResponse)
 async def redeem(body: RedeemRequest):
     ssp, cookies = await _resolve_session(body.account_id)
-    return await submit_redeem(body.player_id, body.pin_code, body.country_code, ssp, cookies)
+    return await submit_redeem(
+        body.player_id,
+        body.pin_code,
+        body.country_code,
+        ssp,
+        cookies,
+        body.zone_id,
+        body.rc_token,
+        body.rc_uuid,
+    )

@@ -13,15 +13,14 @@ def get_browser_launch_options() -> dict:
 
 
 def get_browser_context_options() -> dict:
-    return {
-        "user_agent": getattr(
-            settings,
-            "MIDASBUY_BROWSER_USER_AGENT",
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        ),
+    options = {
         "viewport": getattr(
             settings,
             "MIDASBUY_BROWSER_VIEWPORT",
             {"width": 1440, "height": 900},
         ),
     }
+    user_agent = getattr(settings, "MIDASBUY_BROWSER_USER_AGENT", "")
+    if user_agent:
+        options["user_agent"] = user_agent
+    return options

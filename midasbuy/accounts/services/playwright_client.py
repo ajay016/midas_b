@@ -1,3 +1,4 @@
+import json
 import logging
 from django.conf import settings
 
@@ -12,6 +13,7 @@ from accounts.utils import (
     get_meta_file_path,
     get_page_data_file_path,
     get_screenshot_file_path,
+    get_server_data_file_path,
     get_session_storage_file_path,
     get_storage_state_file_path,
     get_token_file_path,
@@ -25,6 +27,45 @@ from .login_flow import run_midasbuy_login_flow
 logger = logging.getLogger(__name__)
 
 
+def _select_server_data_snapshot(data: dict) -> dict:
+    keys = (
+        "country",
+        "appid",
+        "muid",
+        "payInfo",
+        "reportParams",
+        "_Exp_DATA",
+        "user",
+        "shopInfo",
+        "countryInfo",
+        "buyType",
+        "gameConfig",
+        "newRiskCtrlComponentOptions",
+    )
+    return {key: data.get(key) for key in keys if key in data}
+
+
+def _server_data_snapshot_is_complete(data: dict) -> bool:
+    pay_info = data.get("payInfo") or {}
+    ip_info = pay_info.get("ipInfo") or {}
+    return bool(
+        ip_info.get("mall_ip")
+        and pay_info.get("drm_info")
+        and data.get("_Exp_DATA")
+    )
+
+
+def _extract_server_data_snapshot(html: str) -> dict:
+    marker = "var SERVER_DATA = "
+    start = html.find(marker)
+    if start < 0:
+        return {}
+
+    start += len(marker)
+    data, _ = json.JSONDecoder().raw_decode(html[start:])
+    return _select_server_data_snapshot(data)
+
+
 def run_browser_login_session(account, session_dir: str) -> dict:
     screenshot_path       = get_screenshot_file_path(session_dir, "browser_open.png")
     html_snapshot_path    = get_html_snapshot_file_path(session_dir, "browser_page.html")
@@ -34,6 +75,7 @@ def run_browser_login_session(account, session_dir: str) -> dict:
     token_path            = get_token_file_path(session_dir)
     xmidas_token_path     = get_xmidas_token_file_path(session_dir)
     page_data_path        = get_page_data_file_path(session_dir)
+    server_data_path      = get_server_data_file_path(session_dir)
     meta_path             = get_meta_file_path(session_dir)
 
     base_url = getattr(
@@ -111,14 +153,31 @@ def run_browser_login_session(account, session_dir: str) -> dict:
                         logger.warning("[MIDASBUY] Failed to visit %s: %s", warm_url, e)
 
                 # Visit redeem page and capture the live xMidasToken
-                redeem_url = "https://www.midasbuy.com/midasbuy/bd/redeem/pubgm"
+                redeem_url = (
+                    "https://www.midasbuy.com/midasbuy/bd/redeem/pubgm"
+                    "?from=self.midasbuy_saas"
+                )
                 try:
                     logger.info("[MIDASBUY] Visiting redeem page to capture xMidasToken")
                     page.goto(redeem_url, wait_until="domcontentloaded", timeout=30000)
+                    try:
+                        page.wait_for_load_state("load", timeout=20000)
+                    except Exception:
+                        logger.warning("[MIDASBUY] redeem page load event timed out")
                     page.wait_for_function(
                         "() => !!document.getElementById('xMidasToken')?.value",
                         timeout=20000,
                     )
+                    try:
+                        page.wait_for_function(
+                            """() => !!(
+                                window.SERVER_DATA?.reportParams?.midasbuyDeviceId ||
+                                window.__Report_INFO?.midasbuyDeviceId
+                            )""",
+                            timeout=10000,
+                        )
+                    except Exception:
+                        logger.warning("[MIDASBUY] device report data not ready after 10 s")
                     xmidas_token = page.evaluate(
                         "document.getElementById('xMidasToken').value"
                     )
@@ -154,16 +213,29 @@ def run_browser_login_session(account, session_dir: str) -> dict:
                     # Capture publicParams values for pure Python encryption
                     try:
                         page_data = page.evaluate("""
-                            () => ({
-                                midasbuyDeviceId: (window.__Report_INFO || {}).midasbuyDeviceId || '',
-                                midasuid:         (window.__Report_INFO || {}).midasuid         || '',
-                                uuidCookie:       (document.cookie.match(/UUID=([^;]*)/) || [,''])[1],
-                                appid:            (window.SERVER_DATA || {}).appid            || '1900000047',
-                                country:          (window.SERVER_DATA || {}).country          || 'bd',
-                                midasbuyArea:     (window.SERVER_DATA || {}).midasbuyArea     || '',
-                                currency_type:    (window.SERVER_DATA || {}).currency_type    || 'USD',
-                                zoneid:           String((window.SERVER_DATA || {}).zoneid    || '1'),
-                            })
+                            () => {
+                                const sd = window.SERVER_DATA || {};
+                                const payInfo = sd.payInfo || {};
+                                const report = sd.reportParams || window.__Report_INFO || {};
+                                const deviceCookie = (
+                                    document.cookie.match(/midasbuyDeviceId=([^;]*)/) || [,'']
+                                )[1];
+                                return {
+                                    midasbuyDeviceId: report.midasbuyDeviceId || deviceCookie,
+                                    midasuid: report.midasuid || sd.muid || sd.user?.uid || '',
+                                    uuidCookie: (document.cookie.match(/UUID=([^;]*)/) || [,''])[1],
+                                    appid: payInfo.appid || sd.appid || '1450015065',
+                                    country: payInfo.country || sd.country || 'bd',
+                                    midasbuyArea: payInfo.midasbuyArea || sd.midasbuyArea || '',
+                                    currency_type: payInfo.currency_type || sd.currency_type || 'USD',
+                                    zoneid: String(
+                                        payInfo.zoneid ||
+                                        payInfo.zone_id ||
+                                        payInfo.currentBindUser?.zoneid ||
+                                        '1'
+                                    ),
+                                };
+                            }
                         """)
                         save_json_file(page_data_path, page_data)
                         logger.info("[MIDASBUY] page_data saved: device=%s muid=%s",
@@ -171,6 +243,39 @@ def run_browser_login_session(account, session_dir: str) -> dict:
                                     page_data.get("midasuid", ""))
                     except Exception as e:
                         logger.warning("[MIDASBUY] Failed to capture page_data: %s", e)
+
+                    try:
+                        server_data = page.evaluate("""
+                            () => {
+                                const sd = window.SERVER_DATA || {};
+                                return {
+                                    country: sd.country,
+                                    appid: sd.appid,
+                                    muid: sd.muid,
+                                    payInfo: sd.payInfo || {},
+                                    reportParams: sd.reportParams || window.__Report_INFO || {},
+                                    _Exp_DATA: sd._Exp_DATA || {},
+                                    user: sd.user || null,
+                                    newRiskCtrlComponentOptions: sd.newRiskCtrlComponentOptions || {},
+                                    shopInfo: sd.shopInfo || {},
+                                    countryInfo: sd.countryInfo || {},
+                                    buyType: sd.buyType,
+                                    gameConfig: sd.gameConfig || {},
+                                };
+                            }
+                        """)
+                        logger.info(
+                            "[MIDASBUY] runtime SERVER_DATA captured: pay=%s ip=%s drm=%s exp=%s",
+                            bool(server_data.get("payInfo")),
+                            bool(server_data.get("payInfo", {}).get("ipInfo", {}).get("mall_ip")),
+                            bool(server_data.get("payInfo", {}).get("drm_info")),
+                            bool(server_data.get("_Exp_DATA")),
+                        )
+                        if _server_data_snapshot_is_complete(server_data):
+                            save_json_file(server_data_path, server_data)
+                            logger.info("[MIDASBUY] complete runtime SERVER_DATA snapshot saved")
+                    except Exception as e:
+                        logger.warning("[MIDASBUY] Failed to capture SERVER_DATA: %s", e)
 
                 except Exception as e:
                     logger.warning("[MIDASBUY] Failed to capture xMidasToken: %s", e)
@@ -181,6 +286,27 @@ def run_browser_login_session(account, session_dir: str) -> dict:
             html = page.content()
             save_text_file(html_snapshot_path, html)
             logger.info("[MIDASBUY] html snapshot saved path=%s length=%s", html_snapshot_path, len(html))
+            try:
+                server_data = _extract_server_data_snapshot(html)
+                if _server_data_snapshot_is_complete(server_data):
+                    save_json_file(server_data_path, server_data)
+                    logger.info(
+                        "[MIDASBUY] complete SERVER_DATA bootstrap saved from HTML: "
+                        "pay=%s ip=%s drm=%s exp=%s",
+                        bool(server_data.get("payInfo")),
+                        bool(server_data.get("payInfo", {}).get("ipInfo", {}).get("mall_ip")),
+                        bool(server_data.get("payInfo", {}).get("drm_info")),
+                        bool(server_data.get("_Exp_DATA")),
+                    )
+                else:
+                    logger.warning(
+                        "[MIDASBUY] HTML SERVER_DATA bootstrap is incomplete; snapshot not saved"
+                    )
+            except Exception as e:
+                logger.warning(
+                    "[MIDASBUY] Failed to extract SERVER_DATA bootstrap from HTML: %s",
+                    e,
+                )
 
             storage_state = context.storage_state()
             save_json_file(storage_state_path, storage_state)

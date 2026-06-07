@@ -12,17 +12,22 @@ import os
 os.environ.setdefault("DJANGO_SETTINGS_MODULE", "midasbuy_project.settings")
 
 # Django must be set up before any Django imports
+from django.conf import settings
 from django.core.asgi import get_asgi_application
+from django.contrib.staticfiles.handlers import ASGIStaticFilesHandler
+
 django_app = get_asgi_application()
+if settings.DEBUG:
+    django_app = ASGIStaticFilesHandler(django_app)
 
 # FastAPI (imported after Django setup to avoid app-registry issues)
 from api.app import api_app  # noqa: E402
-from starlette.routing import Mount
 from starlette.applications import Starlette
+from starlette.routing import Mount
 
 application = Starlette(
     routes=[
         Mount("/api", app=api_app),
-        Mount("/",    app=django_app),
+        Mount("/", app=django_app),
     ]
 )
