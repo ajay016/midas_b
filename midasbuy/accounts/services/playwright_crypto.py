@@ -61,6 +61,12 @@ _CHAOS_VM_LOCAL_PATH = os.path.normpath(
         "kEc9hjFh5DQJbz_iPEWrfFxadMVk4PbLDS-5P8jE73pfdUuDwNGKNVZjdEztcHdofAVaHXo6zRGXgLwuvsK_afAEj6w_mKyiUmq-7AesIRU~.js",
     )
 )
+_MIDAS_SDK_LOCAL_PATH = os.path.normpath(
+    os.path.join(
+        os.path.dirname(__file__), "..", "..", "..",
+        "midas-oversea-h5page.js",
+    )
+)
 
 # Appended to the Chaos VM script (served via page.route).
 # Tries to lock window.xMidas immediately; if the VM assigned it async,
@@ -226,6 +232,7 @@ async ({payloadJson, endpoint, method}) => {
         let actualPayload = JSON.parse(payloadJson);
         const verifiedPlayerStorageKey = 'midasbuy_backend_verified_players';
         let verifiedPlayers = {};
+        let verifiedPlayer = null;
         let verifiedPlayerApplied = false;
         try {
             verifiedPlayers = JSON.parse(
@@ -233,7 +240,7 @@ async ({payloadJson, endpoint, method}) => {
             );
         } catch(e) {}
         if (endpoint.endsWith('/QueryRedeemCodeInfo')) {
-            const verifiedPlayer = verifiedPlayers[actualPayload.open_id];
+            verifiedPlayer = verifiedPlayers[actualPayload.open_id] || null;
             if (verifiedPlayer) {
                 Object.assign(payInfo, verifiedPlayer);
                 verifiedPlayerApplied = true;
@@ -307,13 +314,29 @@ async ({payloadJson, endpoint, method}) => {
         // Merge: actualPayload fields win over publicParams on overlap (e.g. country, appid)
         if (endpoint.endsWith('/QueryRedeemCodeInfo')) {
             const verificationPayload = actualPayload;
-            const zoneParts = String(
+            const playerUserId = (
+                verificationPayload.role_id ||
+                verifiedPlayer?.userid ||
+                verificationPayload.open_id ||
+                payInfo.userid ||
+                ''
+            );
+            const redeemOpenId = (
+                verifiedPlayer?.openid ||
+                payInfo.openid ||
+                payInfo.currentBindUser?.openid ||
+                verificationPayload.openid ||
+                verificationPayload.open_id ||
+                ''
+            );
+            const serverId = String(
+                verifiedPlayer?.zoneid ||
                 actualPayload.zone_id ||
                 payInfo.zoneid ||
                 payInfo.zone_id ||
                 payInfo.currentBindUser?.zoneid ||
                 '1'
-            ).split('_');
+            );
             const language = (
                 sd.countryInfo?.iso?.language ||
                 (Array.isArray(sd.countryInfo?.lang) ? sd.countryInfo.lang[0] : sd.countryInfo?.lang) ||
@@ -330,15 +353,15 @@ async ({payloadJson, endpoint, method}) => {
                 direct_redeem: '1',
                 offer_id: payInfo.appid || sd.appid || '1450015065',
                 platform: payInfo.platform || 'android',
-                server_id: zoneParts[0] || '',
+                server_id: serverId,
                 region: payInfo.country || sd.country || 'BD',
-                open_id: actualPayload.open_id || '',
+                open_id: redeemOpenId,
                 muid: user.uid || actualPayload.muid || sd.muid || '',
                 flexible_return_url: (
                     `https://${location.hostname}/h5/overseah5/views/riskcontrol/landing.html`
                 ),
                 user_ip: payInfo.ipInfo?.mall_ip || '',
-                role_id: zoneParts[1] || '',
+                role_id: playerUserId,
                 language,
                 shop_code: payInfo.shopcode || payInfo.shop_id || shopInfo.shopcode || '',
             };
@@ -405,6 +428,15 @@ async ({payloadJson, endpoint, method}) => {
             data,
             encrypt_msg_len: encrypt_msg.length,
             request_field_names: Object.keys(actualPayload).sort(),
+            request_debug: endpoint.endsWith('/QueryRedeemCodeInfo') ? {
+                open_id: actualPayload.open_id || '',
+                role_id: actualPayload.role_id || '',
+                server_id: actualPayload.server_id || '',
+                region: actualPayload.region || '',
+                shop_code: actualPayload.shop_code || '',
+                has_rc_token: !!actualPayload.rc_token,
+                has_rc_uuid: !!actualPayload.rc_uuid,
+            } : {},
             public_field_names: Object.keys(publicParams).sort(),
             full_json_length: fullJson.length,
             cgi_extend_length: cgi_extend.length,
@@ -551,8 +583,461 @@ async ({payloadJson}) => {
 }
 """
 
+_JS_REDEEM_RESULT_PAGE = """
+async ({payloadJson}) => {
+    try {
+        let tokenWait = 0;
+        while ((!document.getElementById('xMidasToken')?.value) && tokenWait < 150) {
+            await new Promise(r => setTimeout(r, 100));
+            tokenWait++;
+        }
+        const tokenEl = document.getElementById('xMidasToken');
+        if (!tokenEl || !tokenEl.value) return {error: 'no_xmidas_token'};
+
+        const ctoken = tokenEl.value;
+        const versionEl = document.getElementById('xMidasVersion');
+        const ctoken_ver = (versionEl && versionEl.value) ? versionEl.value : '1.0.1';
+
+        let xmWait = 0;
+        while (typeof window.xMidas !== 'function' && xmWait < 150) {
+            await new Promise(r => setTimeout(r, 100));
+            xmWait++;
+        }
+        if (typeof window.xMidas !== 'function') return {error: 'no_xmidas_function'};
+
+        const payload = JSON.parse(payloadJson);
+        const snapshot = window.__backendBootstrap || {};
+        const liveServerData = window.SERVER_DATA || {};
+        const sd = Object.assign({}, snapshot, liveServerData);
+        sd.payInfo = Object.assign(
+            {},
+            snapshot.payInfo || {},
+            liveServerData.payInfo || {}
+        );
+        window.SERVER_DATA = sd;
+
+        const payInfo = sd.payInfo || {};
+        let storedUser = {};
+        try {
+            storedUser = JSON.parse(sessionStorage.getItem('user_login_data') || '{}');
+        } catch(e) {}
+
+        let verifiedPlayers = {};
+        try {
+            verifiedPlayers = JSON.parse(
+                sessionStorage.getItem('midasbuy_backend_verified_players') || '{}'
+            );
+        } catch(e) {}
+
+        const verifiedPlayer = verifiedPlayers[payload.player_id] || {};
+        if (verifiedPlayer.openid) {
+            Object.assign(payInfo, verifiedPlayer);
+        }
+
+        const resultOpenId = (
+            payload.openid ||
+            verifiedPlayer.openid ||
+            payInfo.openid ||
+            payInfo.currentBindUser?.openid ||
+            payload.player_id ||
+            ''
+        );
+        if (!resultOpenId) return {error: 'missing_result_openid'};
+
+        const buyType = (
+            new URLSearchParams(location.search).get('buyType') ||
+            sd.buyType ||
+            'REDEEM'
+        ).toUpperCase();
+        let pageId = String(payInfo.pageid || '').trim();
+        if (!pageId) {
+            pageId = `page_${String(Math.random()).slice(2, 19)}`;
+        }
+        const buyTypeKey = payload.buy_type_key || `CURRENT_BUY_ITEM_${buyType}_${pageId}`;
+
+        const country = String(payload.country_code || sd.country || 'bd').toLowerCase();
+        const gameShortUrl = sd.gameConfig?.gameShortUrl || payload.game_short_url || 'pubgm';
+        const resultParams = {
+            appid: String(payInfo.appid || sd.appid || payload.appid || '1450015065'),
+            type: 'redeem',
+            resultPageType: 'redeem',
+            openid: resultOpenId,
+            buy_type_key: buyTypeKey,
+            gameShortUrl,
+            isFromJsx: 'true',
+        };
+        const fullJson = JSON.stringify(resultParams);
+
+        let serverTimeOffset = Number(window._SERVER_TIME_OFFSET || 0);
+        if (serverTimeOffset > 0 && serverTimeOffset <= 15000) {
+            serverTimeOffset = 0;
+        }
+        const pageTime = Date.now() - serverTimeOffset;
+        const pagetoken = btoa(`${location.hostname}_${pageTime}_${resultOpenId}`);
+
+        try { window.xMidas(); } catch(e) {}
+        const hexResult = window.xMidas({d: fullJson});
+        if (!hexResult || typeof hexResult !== 'string' || hexResult.length === 0) {
+            return {error: 'xmidas_empty'};
+        }
+
+        const bytes = (hexResult.match(/../g) || []).map(h => parseInt(h, 16));
+        const encrypt_msg = btoa(String.fromCharCode(...bytes));
+        document.cookie = `pagetoken=${pagetoken}; path=/`;
+
+        const url = new URL(
+            `https://${location.hostname}/midasbuy/${country}/result/${gameShortUrl}`
+        );
+        for (const [key, value] of Object.entries(resultParams)) {
+            url.searchParams.set(key, value);
+        }
+        url.searchParams.set('encrypt_msg', encrypt_msg);
+        url.searchParams.set('ctoken_ver', ctoken_ver);
+        url.searchParams.set('ctoken', ctoken);
+
+        const resp = await fetch(url.toString(), {
+            method: 'GET',
+            headers: {
+                'Accept': 'application/json, text/plain, */*',
+                'X-Requested-With': 'XMLHttpRequest',
+            },
+            credentials: 'include',
+        });
+        const text = await resp.text();
+        let data;
+        try {
+            data = JSON.parse(text);
+        } catch(e) {
+            return {
+                error: 'invalid_json',
+                status: resp.status,
+                text: text.substring(0, 300),
+                result_url: url.toString(),
+                encrypt_msg_len: encrypt_msg.length,
+            };
+        }
+
+        return {
+            ok: true,
+            status: resp.status,
+            data,
+            result_url: url.toString(),
+            result_openid: resultOpenId,
+            buy_type_key: buyTypeKey,
+            encrypt_msg_len: encrypt_msg.length,
+            full_json_length: fullJson.length,
+            pagetoken_length: pagetoken.length,
+            request_field_names: Object.keys(resultParams).sort(),
+            verified_player_applied: !!verifiedPlayer.openid,
+        };
+    } catch(e) {
+        return {
+            error: 'js_exception',
+            detail: String(e),
+            stack: (e.stack || '').substring(0, 500),
+        };
+    }
+}
+"""
+
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
+
+_JS_REDEEM_ORDER = """
+async ({payloadJson, sdkScript}) => {
+    const messages = [];
+    const pushMessage = (kind, value) => {
+        try { messages.push({kind, value}); } catch(e) {}
+    };
+    const queryString = (obj) => Object.keys(obj)
+        .filter(k => obj[k] !== undefined && obj[k] !== null && obj[k] !== '')
+        .map(k => encodeURIComponent(k) + '=' + encodeURIComponent(obj[k]))
+        .join('&');
+    const parseMaybeJson = (value) => {
+        if (typeof value !== 'string') return value;
+        try { return JSON.parse(value); } catch(e) { return value; }
+    };
+    const extractOrder = (value) => {
+        const data = parseMaybeJson(value) || {};
+        if (typeof data !== 'object') return {};
+        const url = data.url || data.successUrl || data.link || '';
+        let queryOrder = {};
+        if (url && typeof url === 'string') {
+            try {
+                const parsed = new URL(url, location.href);
+                queryOrder = {
+                    order_no: parsed.searchParams.get('order_no') || '',
+                    order_no_hash: parsed.searchParams.get('order_no_hash') || '',
+                    portal_serial_no: parsed.searchParams.get('portal_serial_no') || '',
+                };
+            } catch(e) {}
+        }
+        return {
+            order_no: data.order_no || data.orderNo || data.orderInfo?.order_no || queryOrder.order_no || '',
+            order_no_hash: data.order_no_hash || data.orderNoHash || queryOrder.order_no_hash || '',
+            portal_serial_no: data.portal_serial_no || data.portalNo || data.orderInfo?.portal_serial_no || queryOrder.portal_serial_no || '',
+            status: data.status || data.orderStatus || '',
+            action: data.action || data._cmd__ || data.type || '',
+            raw: data,
+        };
+    };
+
+    try {
+        const input = JSON.parse(payloadJson);
+        const cleanCode = String(input.pin_code || input.redeem_code || '').replace(/\\s+/g, '');
+        if (!cleanCode) return {error: 'missing_redeem_code'};
+
+        if (!window.midas?.buyGame && sdkScript) {
+            const script = document.createElement('script');
+            script.text = sdkScript;
+            document.head.appendChild(script);
+            script.remove();
+        }
+        let midasWait = 0;
+        while (!window.midas?.buyGame && midasWait < 10) {
+            await new Promise(r => setTimeout(r, 100));
+            midasWait++;
+        }
+        if (!window.midas?.buyGame) {
+            return {
+                error: 'no_midas_buy_game',
+                midasKeys: Object.keys(window).filter(k => k.toLowerCase().includes('midas')),
+            };
+        }
+
+        let tokenWait = 0;
+        while ((!document.getElementById('xMidasToken')?.value) && tokenWait < 150) {
+            await new Promise(r => setTimeout(r, 100));
+            tokenWait++;
+        }
+        if (!document.getElementById('xMidasToken')?.value) return {error: 'no_xmidas_token'};
+
+        let storedUser = {};
+        try { storedUser = JSON.parse(sessionStorage.getItem('user_login_data') || '{}'); } catch(e) {}
+        let verifiedPlayers = {};
+        try {
+            verifiedPlayers = JSON.parse(sessionStorage.getItem('midasbuy_backend_verified_players') || '{}');
+        } catch(e) {}
+
+        const snapshot = window.__backendBootstrap || {};
+        const liveServerData = window.SERVER_DATA || {};
+        const sd = Object.assign({}, snapshot, liveServerData);
+        sd.payInfo = Object.assign({}, snapshot.payInfo || {}, liveServerData.payInfo || {});
+        window.SERVER_DATA = sd;
+
+        const payInfo = sd.payInfo;
+        const playerId = String(input.player_id || '');
+        const verifiedPlayer = verifiedPlayers[playerId] || {};
+        if (verifiedPlayer.openid) Object.assign(payInfo, verifiedPlayer);
+
+        const ri = window.__Report_INFO || {};
+        const rp = sd.reportParams || {};
+        const shopInfo = sd.shopInfo || {};
+        const appid = String(input.appid || payInfo.appid || sd.appid || '1450015065');
+        const openid = String(verifiedPlayer.openid || payInfo.openid || payInfo.currentBindUser?.openid || '');
+        const userid = String(verifiedPlayer.userid || payInfo.userid || payInfo.currentBindUser?.userid || playerId);
+        const zoneid = String(verifiedPlayer.zoneid || payInfo.zoneid || payInfo.zone_id || payInfo.currentBindUser?.zoneid || '1');
+        const productId = String(input.product_id || '');
+        if (!openid) return {error: 'missing_verified_openid', player_id: playerId};
+        if (!productId) return {error: 'missing_product_id'};
+
+        const user = sd.user || payInfo.midasUser || storedUser || {};
+        const muid = rp.midasuid || ri.midasuid || sd.muid || user.uid || payInfo.midasUser?.uid || storedUser.uid || '';
+        const deviceMatch = document.cookie.match(/midasbuyDeviceId=([^;]*)/);
+        const deviceId = rp.midasbuyDeviceId || ri.midasbuyDeviceId || (deviceMatch ? deviceMatch[1] : '');
+        const uuidMatch = document.cookie.match(/UUID=([^;]*)/);
+        const tdrcFp = uuidMatch ? uuidMatch[1] : '';
+        let serverTimeOffset = Number(window._SERVER_TIME_OFFSET || 0);
+        if (serverTimeOffset > 0 && serverTimeOffset <= 15000) serverTimeOffset = 0;
+        const pageTime = Date.now() - serverTimeOffset;
+        const pagetoken = btoa(`${location.hostname}_${pageTime}_${openid}`);
+        const pf = payInfo.pf || 'mds_pc_browser-yy-android-midasweb-midasbuy-self.midasbuy_saas';
+        const country = String(payInfo.country || sd.country || input.country_code || 'BD').toUpperCase();
+        const currencyType = String(payInfo.currency_type || sd.currency_type || 'BDT');
+        const rawPageId = String(payInfo.pageid || ri.pageid || Math.random()).replace(/^page_/, '');
+        const pageId = rawPageId || String(Math.random()).slice(2, 19);
+        const buyTypeKey = `CURRENT_BUY_ITEM_REDEEM_page_${pageId}`;
+        const callbackBase = `${location.protocol}//${location.hostname}${location.port ? ':' + location.port : ''}/callback/`;
+
+        payInfo.appid = appid;
+        payInfo.openid = openid;
+        payInfo.userid = userid;
+        payInfo.zoneid = zoneid;
+        payInfo.country = country;
+        payInfo.currency_type = currencyType;
+        payInfo.pf = pf;
+        payInfo.platform = payInfo.platform || 'android';
+        payInfo.shop_id = payInfo.shop_id || payInfo.shopcode || shopInfo.shopcode || 'midasbuy';
+        payInfo.shopcode = payInfo.shopcode || payInfo.shop_id || shopInfo.shopcode || 'midasbuy';
+        payInfo.currentBindUser = Object.assign({}, payInfo.currentBindUser || {}, {openid, userid, zoneid});
+
+        let iframe = document.getElementById('redeemCodeChannelIframe');
+        if (!iframe) {
+            iframe = document.createElement('iframe');
+            iframe.id = 'redeemCodeChannelIframe';
+            iframe.setAttribute('frameborder', '0');
+            document.body.appendChild(iframe);
+        }
+        Object.assign(iframe.style, {
+            display: 'block',
+            visibility: 'visible',
+            width: '0px',
+            height: '0px',
+            position: 'fixed',
+            left: '-9999px',
+            top: '-9999px',
+        });
+
+        const cgiExtend = {
+            device_id: deviceId,
+            order_refer: '',
+            pagetoken,
+            tdrc_fp: tdrcFp,
+            muid,
+        };
+        if (payInfo.ipInfo?.mall_ip) cgiExtend.mall_ip = payInfo.ipInfo.mall_ip;
+
+        const params = {
+            pageid: `page_${pageId}`,
+            appid,
+            openid,
+            sandbox: payInfo.sandbox || '',
+            pf,
+            platform: payInfo.platform || 'android',
+            isShelfRule: +!!sd.isShelfRule,
+            drm_info: encodeURIComponent(queryString(payInfo.drm_info || {})),
+            usePC: '1',
+            pfkey: payInfo.pfkey || '',
+            currency_type: currencyType,
+            country,
+            session_id: 'hy_gameid',
+            session_type: 'st_dummy',
+            zoneid,
+            charac_no: userid,
+            productid: productId,
+            origin_product_id: productId,
+            ca: '0',
+            pendingUrl: `${callbackBase}pending?isFromJsx=true&buy_type_key=${buyTypeKey}`,
+            successUrl: `${callbackBase}success?isFromJsx=true&buy_type_key=${buyTypeKey}`,
+            failUrl: `${callbackBase}fail?isFromJsx=true&buy_type_key=${buyTypeKey}`,
+            msgUrl: location.href,
+            version: 'midasbuy_v2',
+            localKey: buyTypeKey,
+            app_metadata: encodeURIComponent(`muid=${muid || ''}`),
+            cgi_extend: queryString(cgiExtend).replace(/[!'()]/g, ''),
+            shelf_product_id: productId,
+            quantity: '1',
+            shop_id: payInfo.shop_id || 'midasbuy',
+            promotions: '[]',
+            from: pf,
+            num: '1',
+            send: '0',
+            gift: '',
+            buyTypeKey,
+            image_url: '',
+            lan: (sd.countryInfo?.iso?.language || 'en').split('-')[0],
+            channel: 'os_midaspay_v2',
+            subchannel: 'MIDASBUY_REDEEM',
+            id: 'MIDASBUY_REDEEM',
+            productId,
+            newtab: 0,
+            usePost: '1',
+            target: iframe.contentWindow,
+            redeem_code: cleanCode,
+        };
+
+        const result = await new Promise(resolve => {
+            let done = false;
+            const finish = (value) => {
+                if (done) return;
+                done = true;
+                clearTimeout(timer);
+                window.removeEventListener('message', onWindowMessage);
+                resolve(value);
+            };
+            const onWindowMessage = (event) => {
+                const parsed = parseMaybeJson(event.data);
+                pushMessage('window_message', {origin: event.origin, data: parsed});
+                const order = extractOrder(parsed);
+                if (order.order_no || order.portal_serial_no) {
+                    finish(Object.assign({ok: true, source: 'window_message'}, order));
+                }
+                if (order.action === 'error' || order.status === 'error') {
+                    finish({error: 'sdk_window_error', source: 'window_message', data: parsed});
+                }
+            };
+            const timer = setTimeout(() => {
+                finish({
+                    error: 'sdk_order_timeout',
+                    iframe_src: iframe.getAttribute('src') || '',
+                    messages,
+                });
+            }, 12000);
+
+            window.addEventListener('message', onWindowMessage);
+            try {
+                window.midas.buyGame(params, {
+                    onMessage(value) {
+                        pushMessage('onMessage', parseMaybeJson(value));
+                        const order = extractOrder(value);
+                        if (order.order_no || order.portal_serial_no) {
+                            finish(Object.assign({ok: true, source: 'onMessage'}, order));
+                        }
+                        if (order.action === 'error' || order.status === 'error') {
+                            finish({error: 'sdk_on_message_error', source: 'onMessage', data: value});
+                        }
+                    },
+                    onSuccess(value) {
+                        pushMessage('onSuccess', parseMaybeJson(value));
+                        const order = extractOrder(value);
+                        finish(Object.assign({ok: true, source: 'onSuccess'}, order));
+                    },
+                    onError(value) {
+                        pushMessage('onError', parseMaybeJson(value));
+                        finish({error: 'sdk_on_error', source: 'onError', data: value});
+                    },
+                });
+            } catch(e) {
+                finish({
+                    error: 'sdk_exception',
+                    detail: String(e),
+                    stack: (e.stack || '').substring(0, 500),
+                });
+            }
+        });
+
+        const iframeSrc = iframe.getAttribute('src') || '';
+        return Object.assign({}, result, {
+            order_param_names: Object.keys(params).filter(k => k !== 'target').sort(),
+            request_debug: {
+                appid,
+                openid,
+                userid,
+                zoneid,
+                product_id: productId,
+                currency_type: currencyType,
+                buy_type_key: buyTypeKey,
+                channel: params.channel,
+                subchannel: params.subchannel,
+                has_redeem_code: !!cleanCode,
+                has_target: !!params.target,
+                cgi_extend_len: params.cgi_extend.length,
+                has_midas_buy_game: !!window.midas?.buyGame,
+            },
+            iframe_src: iframeSrc.split('encrypt_msg=', 1)[0],
+            messages,
+        });
+    } catch(e) {
+        return {
+            error: 'js_exception',
+            detail: String(e),
+            stack: (e.stack || '').substring(0, 500),
+            messages,
+        };
+    }
+}
+"""
+
 
 def _setup_chaos_vm_protection(page) -> None:
     """
@@ -735,14 +1220,17 @@ def _restore_server_data_snapshot(page, storage_state_path: str) -> None:
         logger.warning("[CRYPTO] SERVER_DATA snapshot restore failed: %s", exc)
 
 
-def _launch_context(p, storage_state_path: str, country_code: str):
+def _launch_context(p, storage_state_path: str, country_code: str, bypass_csp: bool = False,
+                    headless: Optional[bool] = None):
     from django.conf import settings
 
     ss_data = _load_session_storage(storage_state_path)
     server_data = _load_server_data_snapshot(storage_state_path)
 
+    if headless is None:
+        headless = getattr(settings, "MIDASBUY_CRYPTO_BROWSER_HEADLESS", True)
     browser = p.chromium.launch(
-        headless=getattr(settings, "MIDASBUY_CRYPTO_BROWSER_HEADLESS", True),
+        headless=headless,
         args=[
             "--no-sandbox",
             "--disable-dev-shm-usage",
@@ -767,6 +1255,7 @@ def _launch_context(p, storage_state_path: str, country_code: str):
         viewport=getattr(settings, "MIDASBUY_BROWSER_VIEWPORT", {"width": 1440, "height": 900}),
         locale="en-US",
         timezone_id=timezone_by_country.get(country_code.lower(), "UTC"),
+        bypass_csp=bypass_csp,
     )
 
     context.add_init_script(_STEALTH_JS)
@@ -1091,7 +1580,7 @@ def _extract_browser_result(result: Optional[dict], endpoint: str) -> Optional[d
         "cgi_len=%s  drm_len=%s  exp_len=%s  pagetoken_len=%s  "
         "device=%s  muid=%s  ip=%s  drm=%s  exp=%s  verified_players=%s  "
         "verified_player_applied=%s  "
-        "request_fields=%s  public_fields=%s",
+        "request_fields=%s  request_debug=%s  public_fields=%s",
         result.get("status"),
         result.get("encrypt_msg_len"),
         result.get("full_json_length"),
@@ -1107,6 +1596,7 @@ def _extract_browser_result(result: Optional[dict], endpoint: str) -> Optional[d
         result.get("verified_player_count"),
         result.get("verified_player_applied"),
         result.get("request_field_names"),
+        result.get("request_debug"),
         result.get("public_field_names"),
     )
     return result.get("data")
@@ -1157,6 +1647,316 @@ def _call_api_in_cached_browser(
                     continue
 
             return _extract_browser_result(result, endpoint)
+
+    return None
+
+
+def _sdk_redeem_error_message(result: dict) -> str:
+    error = str(result.get("error") or "sdk_order_failed")
+    if error == "sdk_order_timeout":
+        return (
+            "Midasbuy did not return an order confirmation from the redeem "
+            "iframe. The code has not been confirmed as redeemed."
+        )
+    if error == "no_midas_buy_game":
+        return "Midasbuy redeem SDK did not initialize in the browser session."
+    if error == "missing_product_id":
+        return "Redeem product information was missing before final confirmation."
+    if error == "missing_verified_openid":
+        return "Player lookup data was missing before final confirmation."
+    if error.startswith("sdk_on_error") or error.startswith("sdk_window_error"):
+        data = result.get("data")
+        if isinstance(data, dict):
+            return data.get("msg") or data.get("message") or error
+    return error
+
+
+def call_redeem_order_in_browser(
+    payload: dict,
+    storage_state_path: str,
+    country_code: str = "bd",
+    timeout_ms: int = 60_000,
+) -> Optional[dict]:
+    """
+    Submit the actual Midasbuy redeem transaction through the official SDK.
+
+    QueryRedeemCodeInfo only validates the code. A real successful redemption
+    emits /callback/success with order_no/order_no_hash through the hidden
+    MIDASBUY_REDEEM iframe. This function invokes window.midas.buyGame and
+    returns only the SDK/order message, not the result-page JSON.
+    """
+    payload_json = json.dumps(payload, separators=(",", ":"))
+    sdk_script = ""
+    try:
+        with open(_MIDAS_SDK_LOCAL_PATH, encoding="utf-8") as file:
+            sdk_script = file.read()
+    except OSError as exc:
+        logger.warning("[CRYPTO] local Midas SDK unavailable: %s", exc)
+
+    for attempt in (1, 2):
+        try:
+            session = _get_or_create_cached_session(
+                storage_state_path,
+                country_code,
+                timeout_ms,
+            )
+        except Exception:
+            logger.exception("[CRYPTO] could not create cached browser session")
+            return None
+
+        with session.lock:
+            network_events = []
+
+            def _record_network_event(kind, obj):
+                try:
+                    url = obj.url
+                    if not (
+                        "midasbuy.com" in url
+                        or "harvestsharp.com" in url
+                        or "api.unipay.qq.com" in url
+                    ):
+                        return
+
+                    event = {
+                        "kind": kind,
+                        "method": getattr(obj, "method", None),
+                        "url": url.split("encrypt_msg=", 1)[0],
+                    }
+                    if kind == "response":
+                        event["status"] = obj.status
+                        event["method"] = obj.request.method
+                    if len(network_events) < 60:
+                        network_events.append(event)
+                except Exception:
+                    pass
+
+            def _on_request(req):
+                _record_network_event("request", req)
+
+            def _on_response(resp):
+                _record_network_event("response", resp)
+
+            try:
+                logger.info("[CRYPTO] cached redeem SDK order attempt=%d", attempt)
+                session.page.on("request", _on_request)
+                session.page.on("response", _on_response)
+                result = session.page.evaluate(_JS_REDEEM_ORDER, {
+                    "payloadJson": payload_json,
+                    "sdkScript": sdk_script,
+                })
+                session.last_used = time.time()
+            except Exception:
+                logger.exception("[CRYPTO] cached redeem SDK order evaluate failed")
+                _discard_cached_session(session)
+                if attempt == 1:
+                    continue
+                return None
+            finally:
+                try:
+                    session.page.remove_listener("request", _on_request)
+                    session.page.remove_listener("response", _on_response)
+                except Exception:
+                    pass
+
+            if not result:
+                logger.error("[CRYPTO] redeem SDK order evaluate returned None")
+                return None
+
+            if result.get("error") in {
+                "no_xmidas_token",
+                "js_exception",
+            }:
+                logger.warning(
+                    "[CRYPTO] cached page stale during redeem SDK order (%s), rebuilding",
+                    result.get("error"),
+                )
+                _discard_cached_session(session)
+                if attempt == 1:
+                    continue
+
+            logger.info(
+                "[CRYPTO] redeem SDK order result ok=%s error=%s source=%s "
+                "order_no=%s portal_serial_no=%s iframe_src=%s",
+                result.get("ok"),
+                result.get("error"),
+                result.get("source"),
+                result.get("order_no"),
+                result.get("portal_serial_no"),
+                result.get("iframe_src"),
+            )
+            logger.info(
+                "[CRYPTO] redeem SDK order debug=%s",
+                json.dumps(result.get("request_debug") or {}, ensure_ascii=False),
+            )
+            logger.debug(
+                "[CRYPTO] redeem SDK order messages=%s",
+                json.dumps(result.get("messages") or [], ensure_ascii=False, default=str)[:5000],
+            )
+            logger.debug(
+                "[CRYPTO] redeem SDK order network events=%s",
+                json.dumps(network_events, ensure_ascii=False),
+            )
+
+            if result.get("error"):
+                return {
+                    "ret": 1,
+                    "err_code": result.get("error"),
+                    "msg": _sdk_redeem_error_message(result),
+                    "sdk_result": result,
+                    "network_events": network_events,
+                }
+
+            result["network_events"] = network_events
+            return result
+
+    return None
+
+
+def call_redeem_result_in_browser(
+    payload: dict,
+    storage_state_path: str,
+    country_code: str = "bd",
+    timeout_ms: int = 60_000,
+) -> Optional[dict]:
+    """
+    Confirm a valid redeem code by loading Midasbuy's encrypted result route.
+
+    The official redeem confirmation does not POST another JSON API in the
+    captured HAR. It navigates/fetches:
+        /midasbuy/<country>/result/pubgm?...&encrypt_msg=...&ctoken=...
+    where encrypt_msg is generated from {t, h, o}, not the full redeem payload.
+    """
+    payload_json = json.dumps(payload, separators=(",", ":"))
+
+    for attempt in (1, 2):
+        try:
+            session = _get_or_create_cached_session(
+                storage_state_path,
+                country_code,
+                timeout_ms,
+            )
+        except Exception:
+            logger.exception("[CRYPTO] could not create cached browser session")
+            return None
+
+        with session.lock:
+            network_events = []
+
+            def _record_network_event(kind, obj):
+                try:
+                    url = obj.url
+                    if not (
+                        "midasbuy.com" in url
+                        or "harvestsharp.com" in url
+                        or "tencent.com" in url
+                    ):
+                        return
+
+                    event = {
+                        "kind": kind,
+                        "method": getattr(obj, "method", None),
+                        "url": url.split("encrypt_msg=", 1)[0],
+                    }
+                    if kind == "response":
+                        event["status"] = obj.status
+                        event["method"] = obj.request.method
+                    if len(network_events) < 30:
+                        network_events.append(event)
+                except Exception:
+                    pass
+
+            def _on_request(req):
+                _record_network_event("request", req)
+
+            def _on_response(resp):
+                _record_network_event("response", resp)
+
+            try:
+                logger.info("[CRYPTO] cached redeem result GET attempt=%d", attempt)
+                session.page.on("request", _on_request)
+                session.page.on("response", _on_response)
+                result = session.page.evaluate(_JS_REDEEM_RESULT_PAGE, {
+                    "payloadJson": payload_json,
+                })
+                session.last_used = time.time()
+            except Exception:
+                logger.exception("[CRYPTO] cached redeem result evaluate failed")
+                _discard_cached_session(session)
+                if attempt == 1:
+                    continue
+                return None
+            finally:
+                try:
+                    session.page.remove_listener("request", _on_request)
+                    session.page.remove_listener("response", _on_response)
+                except Exception:
+                    pass
+
+            if result and result.get("error") in {
+                "no_xmidas_token",
+                "no_xmidas_function",
+                "xmidas_empty",
+                "js_exception",
+            }:
+                logger.warning(
+                    "[CRYPTO] cached page stale during redeem result (%s), rebuilding",
+                    result.get("error"),
+                )
+                _discard_cached_session(session)
+                if attempt == 1:
+                    continue
+
+            if not result:
+                logger.error("[CRYPTO] redeem result evaluate returned None")
+                return None
+
+            if result.get("error"):
+                logger.error(
+                    "[CRYPTO] redeem result failed error=%s status=%s detail=%s text=%s",
+                    result.get("error"),
+                    result.get("status"),
+                    result.get("detail"),
+                    result.get("text"),
+                )
+                return None
+
+            logger.info(
+                "[CRYPTO] redeem result ok status=%s encrypt_msg_len=%s "
+                "full_json_len=%s pagetoken_len=%s openid=%s buy_type_key=%s "
+                "verified_player_applied=%s result_url=%s",
+                result.get("status"),
+                result.get("encrypt_msg_len"),
+                result.get("full_json_length"),
+                result.get("pagetoken_length"),
+                result.get("result_openid"),
+                result.get("buy_type_key"),
+                result.get("verified_player_applied"),
+                result.get("result_url", "").split("encrypt_msg=", 1)[0],
+            )
+
+            data = result.get("data")
+            if isinstance(data, dict):
+                pay_info = data.get("payInfo") if isinstance(data.get("payInfo"), dict) else {}
+                current_bind_user = (
+                    pay_info.get("currentBindUser")
+                    if isinstance(pay_info.get("currentBindUser"), dict)
+                    else {}
+                )
+                logger.info(
+                    "[CRYPTO] redeem result markers pageHandlerName=%s type=%s "
+                    "isRedeem=%s appid=%s bind_openid=%s bind_userid=%s",
+                    data.get("pageHandlerName"),
+                    data.get("type"),
+                    data.get("isRedeem"),
+                    data.get("appid"),
+                    current_bind_user.get("openid"),
+                    current_bind_user.get("userid"),
+                )
+            logger.debug(
+                "[CRYPTO] redeem result network events=%s",
+                json.dumps(network_events, ensure_ascii=False),
+            )
+            return data
 
     return None
 
@@ -1308,3 +2108,449 @@ def _save_debug(page, session_dir: str, name: str) -> None:
         logger.info("[CRYPTO] debug artifacts saved: %s/%s.*", session_dir, name)
     except Exception as e:
         logger.debug("[CRYPTO] could not save debug artifacts: %s", e)
+
+
+# ── Captcha auto-solve: obtain rc_token / rc_uuid via a paid provider ────────────
+#
+# Replaces the manual slider solve. Drives window.midas.newRiskControl(challenge)
+# headlessly, hooks window.TencentCaptcha in every frame to capture the slider's
+# success callback, solves the TCaptcha off-box via 2Captcha, fires the callback
+# with {ticket, randstr} inside the (cross-origin) harvestsharp slider frame —
+# the slider then submits to harvestsharp itself and newRiskControl resolves with
+# {rc_token, rc_uuid}, which the backend feeds into QueryRedeemCodeInfo.
+
+_JS_TCAPTCHA_HOOK = r"""
+() => {
+  try {
+    if (window.__tcapHookInstalled) return;
+    window.__tcapHookInstalled = true;
+    function _grab(args) {
+      for (var i = 0; i < args.length; i++) {
+        var a = args[i];
+        if (typeof a === 'function') { window.__tcaptchaCallback = a; return; }
+        if (a && typeof a === 'object') {
+          for (var k in a) {
+            try { if (typeof a[k] === 'function' && /call|cb|verif|success|done|ready/i.test(k)) { window.__tcaptchaCallback = a[k]; return; } } catch(e) {}
+          }
+        }
+      }
+    }
+    var _real = null;
+    function Wrapped() {
+      var args = Array.prototype.slice.call(arguments);
+      _grab(args);
+      var inst = Object.create(_real && _real.prototype ? _real.prototype : Object.prototype);
+      try { var r = _real.apply(inst, args); if (r && typeof r === 'object') inst = r; } catch(e) {}
+      return inst;
+    }
+    Object.defineProperty(window, 'TencentCaptcha', {
+      configurable: true, enumerable: true,
+      get: function () { return _real ? Wrapped : undefined; },
+      set: function (v) { _real = v; },
+    });
+  } catch (e) {}
+}
+"""
+
+_JS_TRIGGER_RC = r"""
+(function(){
+  var me = document.currentScript;
+  var nonce = me && me.getAttribute('data-nonce');
+  function out(o){ var el = document.getElementById('__rc_out_'+nonce); if (el) el.textContent = JSON.stringify(o); }
+  try {
+    var challenge = JSON.parse(document.getElementById('__rc_in_'+nonce).textContent).challenge;
+    if (!window.midas || typeof window.midas.newRiskControl !== 'function') { out({error:'no_newRiskControl', midas: typeof window.midas}); return; }
+    window.midas.newRiskControl(challenge).then(function(r){
+      out({ok:true, rc_token: r && r.rc_token, rc_uuid: r && r.rc_uuid});
+    }).catch(function(e){ out({error:'rc_rejected', detail: String(e)}); });
+  } catch(e) { out({error:'js_exception', detail: String(e)}); }
+})();
+"""
+
+_RC_SLIDER_SELECTORS = (
+    "#riskControlComponent",
+    "iframe[src*='harvestsharp']",
+    "iframe[src*='slider']",
+    "iframe[src*='captcha']",
+)
+
+
+def _frame_main_eval(fr, body_js: str, data=None):
+    """
+    Run JS in a frame's MAIN world (not patchright's isolated world) by injecting a
+    <script> element, and read the JSON result back via a DOM element. `body_js` is
+    a function body that may use `DATA` (a JSON string of `data`) and `return` a
+    JSON-able value. Requires bypass_csp for cross-origin frames.
+    """
+    rid = "__mw_" + os.urandom(5).hex()
+    fr.evaluate(
+        """(a) => {
+            const r = document.createElement('div');
+            r.id = a.rid; r.style.display = 'none';
+            r.setAttribute('data-in', a.data || '');
+            document.documentElement.appendChild(r);
+            const s = document.createElement('script');
+            s.textContent =
+                '(function(){var __el=document.getElementById("' + a.rid + '");' +
+                'var DATA=__el.getAttribute("data-in");try{' +
+                'var __v=(function(DATA){' + a.body + '})(DATA);' +
+                '__el.textContent=JSON.stringify(__v===undefined?null:__v);' +
+                '}catch(e){__el.textContent=JSON.stringify("ERR:"+e);}})();';
+            document.documentElement.appendChild(s);
+            s.remove();
+        }""",
+        {"rid": rid, "body": body_js, "data": json.dumps(data) if data is not None else ""},
+    )
+    raw = fr.evaluate(
+        "(rid) => { const r = document.getElementById(rid); const t = r ? r.textContent : null; if (r) r.remove(); return t; }",
+        rid,
+    )
+    return json.loads(raw) if raw else None
+
+
+def _rc_inject_token(page, token: dict) -> bool:
+    body = (
+        "var t = JSON.parse(DATA);"
+        "if (typeof window.__tcaptchaCallback === 'function') {"
+        "  window.__tcaptchaCallback({ret: 0, ticket: t.ticket, randstr: t.randstr,"
+        "    CaptchaAppId: t.appid, appid: t.appid, errorCode: 0, errorMessage: 'OK',"
+        "    verifyDuration: 1200, actionDuration: 1000, sid: ''});"
+        "  return 'ok';"
+        "} return 'no_cb';"
+    )
+    for fr in page.frames:
+        try:
+            if _frame_main_eval(fr, body, data=token) == "ok":
+                logger.info("[CAPTCHA] token injected (main world) into frame %s", (fr.url or "")[:90])
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def _rc_slider_present(page) -> bool:
+    for sel in _RC_SLIDER_SELECTORS:
+        try:
+            el = page.query_selector(sel)
+            if el:
+                box = el.bounding_box()
+                if box and box["width"] > 30 and box["height"] > 30:
+                    return True
+        except Exception:
+            continue
+    return False
+
+
+# Appended to TCaptcha-global.js (served via page.route) so window.TencentCaptcha
+# is wrapped before the slider calls it — captures the success callback into
+# window.__tcaptchaCallback even in the cross-origin iframe add_init_script misses.
+_TCAPTCHA_WRAP = b"""
+;(function(){
+  function wrap(_real){
+    function W(){
+      var args=[].slice.call(arguments);
+      for(var i=0;i<args.length;i++){
+        var a=args[i];
+        if(typeof a==='function'){window.__tcaptchaCallback=a;}
+        else if(a&&typeof a==='object'){for(var k in a){try{if(typeof a[k]==='function'&&/call|cb|verif|success|done|ready/i.test(k)){window.__tcaptchaCallback=a[k];}}catch(e){}}}
+      }
+      try{return new (Function.prototype.bind.apply(_real,[null].concat(args)))();}
+      catch(e){var o=Object.create(_real.prototype);try{_real.apply(o,args);}catch(e2){}return o;}
+    }
+    try{for(var k in _real){try{W[k]=_real[k];}catch(e){}}}catch(e){}
+    try{W.prototype=_real.prototype;}catch(e){}
+    return W;
+  }
+  try{
+    var cur=window.TencentCaptcha;
+    if(typeof cur==='function'){window.TencentCaptcha=wrap(cur);window.__tcapHookInstalled=true;}
+    else{
+      var _w=null;
+      Object.defineProperty(window,'TencentCaptcha',{configurable:true,enumerable:true,
+        get:function(){return _w;},
+        set:function(v){_w=(typeof v==='function')?wrap(v):v;window.__tcapHookInstalled=true;}});
+    }
+  }catch(e){}
+})();
+"""
+
+
+def _setup_tcaptcha_hook_route(page) -> None:
+    def handle(route):
+        try:
+            resp = route.fetch()
+            headers = dict(resp.headers)
+            headers.pop("content-length", None)
+            headers["content-type"] = "application/javascript; charset=utf-8"
+            route.fulfill(status=resp.status, headers=headers, body=resp.body() + _TCAPTCHA_WRAP)
+            logger.info("[CAPTCHA] TCaptcha-global.js hook injected via route")
+        except Exception as exc:
+            # Common + harmless: the browser closed (we already have rc_token) while
+            # a background fetch was mid-flight.
+            if "disposed" in str(exc).lower() or "closed" in str(exc).lower():
+                logger.debug("[CAPTCHA] TCaptcha route hook skipped (context closed)")
+            else:
+                logger.warning("[CAPTCHA] TCaptcha route hook failed (%s) — continuing", exc)
+            try:
+                route.continue_()
+            except Exception:
+                pass
+
+    page.route("**TCaptcha-global*", handle)
+
+
+def obtain_rc_token_via_provider(
+    challenge_url: str,
+    storage_state_path: str,
+    country_code: str = "bd",
+    timeout_ms: int = 75_000,
+) -> Optional[dict]:
+    """
+    Produce {rc_token, rc_uuid} for a graphic risk-control challenge using the
+    configured paid solver. Returns None if no provider key, solve fails, or the
+    challenge does not resolve. Runs its own browser (call from a dedicated
+    thread, not the cached-session executor).
+    """
+    from . import captcha_provider
+
+    if not captcha_provider.is_enabled():
+        return None
+
+    sync_playwright, PWTimeout = _get_playwright()
+    redeem_url = f"https://www.midasbuy.com/midasbuy/{country_code}/redeem/pubgm"
+    session_dir = os.path.dirname(storage_state_path)
+
+    try:
+        with sync_playwright() as p:
+            browser, context = _launch_context(p, storage_state_path, country_code, bypass_csp=True)
+            context.add_init_script(_JS_TCAPTCHA_HOOK)
+            page = context.new_page()
+            _setup_chaos_vm_protection(page)
+            _setup_tcaptcha_hook_route(page)
+
+            # Capture the post-callback traffic (PAValidate / Tencent verify) so we
+            # can see whether/why the ticket is accepted. Full bodies (incl. the
+            # slider JS) are dumped to rc_network.txt for offline inspection.
+            dump_path = os.path.join(session_dir, "rc_network.txt")
+            try:
+                open(dump_path, "w", encoding="utf-8").close()
+            except Exception:
+                pass
+
+            def _dump(line):
+                try:
+                    with open(dump_path, "a", encoding="utf-8") as f:
+                        f.write(line + "\n")
+                except Exception:
+                    pass
+
+            _verify_hints = ("pavalidate", "paenroll", "paidentify", "pasetup",
+                             "cap_union_new_verify", "secondary")
+            _capture_hints = _verify_hints + ("/v1/rc/3ds/assets/", "/v1/rc/3ds/api/")
+
+            def _on_req(req):
+                try:
+                    u = req.url.lower()
+                    if any(h in u for h in _verify_hints):
+                        pd = None
+                        try:
+                            pd = req.post_data
+                        except Exception:
+                            pd = None
+                        _dump(f"\n>> {req.method} {req.url}")
+                        if pd:
+                            _dump("POST_DATA: " + pd[:8000])
+                        logger.info("[CAPTCHA][NET] >> %s %s", req.method, req.url[:120])
+                except Exception:
+                    pass
+
+            def _on_resp(resp):
+                try:
+                    u = resp.url.lower()
+                    if any(h in u for h in _capture_hints):
+                        body = None
+                        try:
+                            body = resp.text()
+                        except Exception:
+                            body = None
+                        _dump(f"\n<< {resp.status} {resp.url}")
+                        if body:
+                            _dump(body[:60000])
+                        if any(h in u for h in _verify_hints):
+                            logger.info("[CAPTCHA][NET] << %s %s body=%s", resp.status, resp.url[:120], (body or "")[:300])
+                except Exception:
+                    pass
+
+            page.on("request", _on_req)
+            page.on("response", _on_resp)
+
+            logger.info("[CAPTCHA] obtaining rc_token via provider (challenge ready)")
+            try:
+                page.goto(redeem_url, wait_until="load", timeout=timeout_ms)
+            except PWTimeout:
+                logger.error("[CAPTCHA] page.goto timed out")
+                browser.close()
+                return None
+
+            try:
+                page.wait_for_function(
+                    "() => window.midas && typeof window.midas.newRiskControl === 'function'",
+                    timeout=40_000,
+                )
+            except Exception:
+                logger.error("[CAPTCHA] window.midas.newRiskControl not available")
+                _save_debug(page, session_dir, "rc_no_sdk")
+                browser.close()
+                return None
+
+            # Trigger newRiskControl in the page main world.
+            nonce = os.urandom(8).hex()
+            page.evaluate(
+                """(a) => {
+                    const inEl = document.createElement('div');
+                    inEl.id = '__rc_in_' + a.nonce; inEl.style.display = 'none';
+                    inEl.textContent = JSON.stringify({challenge: a.challenge});
+                    document.documentElement.appendChild(inEl);
+                    const outEl = document.createElement('div');
+                    outEl.id = '__rc_out_' + a.nonce; outEl.style.display = 'none';
+                    document.documentElement.appendChild(outEl);
+                    const s = document.createElement('script');
+                    s.setAttribute('data-nonce', a.nonce);
+                    s.textContent = a.code;
+                    document.documentElement.appendChild(s);
+                }""",
+                {"nonce": nonce, "challenge": challenge_url, "code": _JS_TRIGGER_RC},
+            )
+
+            # Wait for the slider frame to render (we POST CommonCheck from inside
+            # it so the request carries the harvestsharp cookies + origin).
+            for _ in range(60):
+                if _rc_find_slider_frame(page) is not None:
+                    break
+                page.wait_for_timeout(250)
+
+            token = captcha_provider.solve_tencent(redeem_url)
+            if not token or not token.get("ticket"):
+                logger.error("[CAPTCHA] provider returned no token: %s", token)
+                _save_debug(page, session_dir, "rc_no_token")
+                browser.close()
+                return None
+            logger.info("[CAPTCHA] provider token acquired; submitting CommonCheck")
+
+            import re as _re
+            m = _re.search(r"rc_uuid=([^&]+)", challenge_url)
+            rc_uuid = m.group(1) if m else None
+            result = None
+            if rc_uuid:
+                resp = _rc_submit_commoncheck(page, rc_uuid, token, timeout_s=30)
+                result = _rc_extract_token(resp, rc_uuid)
+                if result:
+                    logger.info("[CAPTCHA] rc_token obtained via CommonCheck")
+                else:
+                    logger.warning("[CAPTCHA] CommonCheck did not yield rc_token: %s",
+                                   json.dumps(resp)[:400] if resp else resp)
+            else:
+                logger.error("[CAPTCHA] could not parse rc_uuid from challenge url")
+
+            if result is None:
+                _save_debug(page, session_dir, "rc_unresolved")
+            browser.close()
+            return result
+
+    except Exception:
+        logger.exception("[CAPTCHA] obtain_rc_token_via_provider crashed")
+        return None
+
+
+def _rc_find_slider_frame(page):
+    for fr in page.frames:
+        u = fr.url or ""
+        if "harvestsharp" in u and ("slider" in u or "/rc/3ds/" in u):
+            return fr
+    return None
+
+
+def _rc_extract_token(resp, rc_uuid: str):
+    """Pull {rc_token, rc_uuid} out of a CommonCheck response (flat or under .data)."""
+    if not isinstance(resp, dict):
+        return None
+    for obj in (resp, resp.get("data") if isinstance(resp.get("data"), dict) else {}):
+        if isinstance(obj, dict) and obj.get("rc_token"):
+            return {"rc_token": obj["rc_token"], "rc_uuid": obj.get("rc_uuid") or rc_uuid}
+    return None
+
+
+def _rc_submit_commoncheck(page, rc_uuid: str, token: dict, timeout_s: int = 30):
+    """
+    POST CommonCheck inside the harvestsharp slider frame (same origin → cookies)
+    with the paid-solver ticket, and return the parsed JSON response.
+
+        POST /v1/rc/3ds/api/trpc.tdrc.rc_verification_go.Verification/CommonCheck
+        {rc_uuid, ticket, rand_str, verify_state:"0", verify_type:"graphic"}
+    """
+    fr = _rc_find_slider_frame(page)
+    if fr is None:
+        logger.warning("[CAPTCHA] no harvestsharp slider frame for CommonCheck")
+        return None
+
+    rid = "__cc_" + os.urandom(5).hex()
+    body = {
+        "rc_uuid": rc_uuid,
+        "ticket": token.get("ticket"),
+        "rand_str": token.get("randstr"),
+        "verify_state": "0",
+        "verify_type": "graphic",
+    }
+    fr.evaluate(
+        """(a) => {
+            const r = document.createElement('div');
+            r.id = a.rid; r.style.display = 'none';
+            r.setAttribute('data-body', a.body);
+            document.documentElement.appendChild(r);
+            const s = document.createElement('script');
+            s.textContent =
+                '(function(){var el=document.getElementById("' + a.rid + '");' +
+                'fetch("/v1/rc/3ds/api/trpc.tdrc.rc_verification_go.Verification/CommonCheck",' +
+                '{method:"POST",headers:{"content-type":"application/json"},credentials:"include",' +
+                'body:el.getAttribute("data-body")})' +
+                '.then(function(x){return x.text();})' +
+                '.then(function(b){el.textContent=b||"{}";})' +
+                '.catch(function(e){el.textContent=JSON.stringify({__err:String(e)});});})();';
+            document.documentElement.appendChild(s);
+            s.remove();
+        }""",
+        {"rid": rid, "body": json.dumps(body)},
+    )
+
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        raw = fr.evaluate(
+            "(rid) => { const r = document.getElementById(rid); return r ? r.textContent : null; }",
+            rid,
+        )
+        if raw:
+            try:
+                return json.loads(raw)
+            except Exception:
+                logger.warning("[CAPTCHA] CommonCheck non-JSON response: %s", raw[:300])
+                return None
+        page.wait_for_timeout(500)
+    logger.warning("[CAPTCHA] CommonCheck timed out")
+    return None
+
+
+def _rc_log_frame_diagnostics(page) -> None:
+    """Log, per frame (MAIN world), how TCaptcha is exposed."""
+    body = (
+        "return {url: location.href.slice(0,120),"
+        " tcaptcha: typeof window.TencentCaptcha,"
+        " hookInstalled: !!window.__tcapHookInstalled,"
+        " callbackCaptured: typeof window.__tcaptchaCallback,"
+        " captchaKeys: Object.keys(window).filter(function(k){return /captcha|tcap|cap_|tdc|verif/i.test(k);}).slice(0,25)};"
+    )
+    for fr in page.frames:
+        try:
+            info = _frame_main_eval(fr, body)
+            logger.info("[CAPTCHA][DIAG] %s", json.dumps(info))
+        except Exception as exc:
+            logger.info("[CAPTCHA][DIAG] frame %s probe failed: %s", (fr.url or "")[:80], exc)

@@ -348,6 +348,68 @@
             margin-top: 8px;
         }
 
+        .modal-backdrop {
+            position: fixed;
+            inset: 0;
+            display: none;
+            align-items: center;
+            justify-content: center;
+            padding: 24px;
+            background: rgba(0, 0, 0, 0.72);
+            z-index: 20;
+        }
+
+        .modal-backdrop.show {
+            display: flex;
+        }
+
+        .confirm-modal {
+            width: min(100%, 420px);
+            background: #15181f;
+            border: 1px solid rgba(251, 188, 4, 0.24);
+            border-radius: 16px;
+            padding: 24px;
+            box-shadow: 0 24px 70px rgba(0, 0, 0, 0.6);
+        }
+
+        .confirm-modal h2 {
+            font-size: 18px;
+            margin-bottom: 10px;
+            color: #ffffff;
+        }
+
+        .confirm-modal p {
+            font-size: 13px;
+            line-height: 1.5;
+            color: rgba(255, 255, 255, 0.62);
+        }
+
+        .confirm-product {
+            margin: 16px 0;
+            padding: 14px;
+            border-radius: 10px;
+            background: rgba(251, 188, 4, 0.08);
+            color: #fbbc04;
+            font-size: 15px;
+            font-weight: 700;
+        }
+
+        .modal-actions {
+            display: flex;
+            gap: 10px;
+            justify-content: flex-end;
+            margin-top: 20px;
+        }
+
+        .btn-secondary {
+            background: rgba(255, 255, 255, 0.08);
+            color: rgba(255, 255, 255, 0.75);
+        }
+
+        .btn-secondary:hover {
+            background: rgba(255, 255, 255, 0.12);
+        }
+
         @keyframes spin {
             to {
                 transform: rotate(360deg);
@@ -450,11 +512,26 @@
         </div>
     </div>
 
+    <div id="confirmModal" class="modal-backdrop">
+        <div class="confirm-modal">
+            <h2>Confirm Redemption</h2>
+            <p>The code is valid. Confirm to submit the final Midasbuy redemption request for this player.</p>
+            <div id="confirmProduct" class="confirm-product">UC redeem code</div>
+            <div class="modal-actions">
+                <button class="btn btn-secondary" type="button" onclick="closeConfirmModal()">Cancel</button>
+                <button class="btn btn-primary" id="confirmRedeemBtn" type="button" onclick="confirmRedeemCode()">
+                    Confirm
+                </button>
+            </div>
+        </div>
+    </div>
+
     <script>
         let verifiedPlayerId = null;
         let verifiedPlayerZoneId = "1";
         let riskSdkPromise = null;
         let riskSdkUrl = null;
+        let pendingRedeemPayload = null;
 
         function setStatus(elId, type, html) {
             const el = document.getElementById(elId);
@@ -555,11 +632,9 @@
                     data.challenge_url,
                     data.risk_sdk_url
                 );
-                data = await postRedeem({
-                    ...payload,
-                    rc_token: verification.rc_token,
-                    rc_uuid: verification.rc_uuid,
-                });
+                payload.rc_token = verification.rc_token;
+                payload.rc_uuid = verification.rc_uuid;
+                data = await postRedeem(payload);
             }
 
             if (data.verification_required) {
@@ -567,6 +642,89 @@
             }
 
             return data;
+        }
+
+        async function fetchPlayerInfo(playerId, country, accountId) {
+            const resp = await fetch(
+                `/api/player-info?player_id=${encodeURIComponent(playerId)}&country_code=${country}&account_id=${accountId}`
+            );
+            const data = await resp.json();
+
+            if (!resp.ok || !data.success) {
+                throw new Error(data.detail || data.error || "Player not found.");
+            }
+
+            return data.player;
+        }
+
+        function applyPlayerInfo(playerId, player) {
+            document.getElementById("playerName").textContent = player.username || "(unknown)";
+            document.getElementById("playerMeta").textContent = [
+                player.zone_id && `Zone ${player.zone_id}`,
+            ].filter(Boolean).join(" / ");
+            document.getElementById("playerIdBadge").textContent = `UID: ${player.player_id}`;
+            document.getElementById("playerCard").classList.add("show");
+
+            verifiedPlayerId = playerId;
+            verifiedPlayerZoneId = player.zone_id || "1";
+            document.getElementById("redeemBtn").disabled = false;
+        }
+
+        function showConfirmModal(data, payload) {
+            pendingRedeemPayload = payload;
+            document.getElementById("confirmProduct").textContent =
+                data.product_name || "UC redeem code";
+            document.getElementById("confirmModal").classList.add("show");
+        }
+
+        function closeConfirmModal() {
+            document.getElementById("confirmModal").classList.remove("show");
+            pendingRedeemPayload = null;
+        }
+
+        async function confirmRedeemCode() {
+            if (!pendingRedeemPayload) {
+                closeConfirmModal();
+                return;
+            }
+
+            const btn = document.getElementById("confirmRedeemBtn");
+            const redeemBtn = document.getElementById("redeemBtn");
+            btn.disabled = true;
+            redeemBtn.disabled = true;
+            setStatus(
+                "redeemStatus",
+                "loading",
+                '<span class="spinner"></span>Confirming redemption...'
+            );
+
+            try {
+                const data = await submitRedeemWithVerification({
+                    ...pendingRedeemPayload,
+                    confirm: true,
+                });
+
+                if (data.confirmation_required) {
+                    throw new Error("Midasbuy requested confirmation again. Please retry.");
+                }
+
+                if (data.success) {
+                    closeConfirmModal();
+                    setStatus("redeemStatus", "success", data.message || "Redeemed successfully.");
+                    document.getElementById("pinInput").value = "";
+                } else {
+                    setStatus("redeemStatus", "error", data.message || "Redemption failed.");
+                }
+            } catch (err) {
+                setStatus(
+                    "redeemStatus",
+                    "error",
+                    err.message || "Network error. Please try again."
+                );
+            } finally {
+                btn.disabled = false;
+                redeemBtn.disabled = false;
+            }
         }
 
         async function lookupPlayer() {
@@ -594,30 +752,11 @@
             setStatus("lookupStatus", "loading", '<span class="spinner"></span>Looking up player...');
 
             try {
-                const resp = await fetch(
-                    `/api/player-info?player_id=${encodeURIComponent(playerId)}&country_code=${country}&account_id=${accountId}`
-                );
-                const data = await resp.json();
-
-                if (!resp.ok || !data.success) {
-                    setStatus("lookupStatus", "error", data.detail || data.error || "Player not found.");
-                    return;
-                }
-
-                const p = data.player;
-                document.getElementById("playerName").textContent = p.username || "(unknown)";
-                document.getElementById("playerMeta").textContent = [
-                    p.zone_id && `Zone ${p.zone_id}`,
-                ].filter(Boolean).join(" / ");
-                document.getElementById("playerIdBadge").textContent = `UID: ${p.player_id}`;
-                document.getElementById("playerCard").classList.add("show");
-
-                verifiedPlayerId = playerId;
-                verifiedPlayerZoneId = p.zone_id || "1";
-                document.getElementById("redeemBtn").disabled = false;
+                const player = await fetchPlayerInfo(playerId, country, accountId);
+                applyPlayerInfo(playerId, player);
                 clearStatus("lookupStatus");
             } catch (err) {
-                setStatus("lookupStatus", "error", "Network error. Please try again.");
+                setStatus("lookupStatus", "error", err.message || "Network error. Please try again.");
             } finally {
                 btn.disabled = false;
             }
@@ -625,11 +764,12 @@
 
         async function redeemCode() {
             const pinCode = document.getElementById("pinInput").value.trim();
+            const playerId = document.getElementById("playerIdInput").value.trim();
             const country = document.getElementById("countrySelect").value;
             const accountId = getAccountId();
 
-            if (!verifiedPlayerId) {
-                setStatus("redeemStatus", "error", "Please look up your player first.");
+            if (!playerId) {
+                setStatus("redeemStatus", "error", "Please enter a Player ID.");
                 return;
             }
 
@@ -648,15 +788,35 @@
             setStatus("redeemStatus", "loading", '<span class="spinner"></span>Submitting redeem code...');
 
             try {
-                const data = await submitRedeemWithVerification({
+                if (verifiedPlayerId !== playerId) {
+                    setStatus("redeemStatus", "loading", '<span class="spinner"></span>Verifying player...');
+                    const player = await fetchPlayerInfo(playerId, country, accountId);
+                    applyPlayerInfo(playerId, player);
+                    btn.disabled = true;
+                }
+
+                setStatus("redeemStatus", "loading", '<span class="spinner"></span>Submitting redeem code...');
+                const payload = {
                     player_id: verifiedPlayerId,
                     pin_code: pinCode,
                     country_code: country,
                     zone_id: verifiedPlayerZoneId,
                     account_id: parseInt(accountId, 10),
-                });
+                };
+                const data = await submitRedeemWithVerification(payload);
 
-                if (data.success) {
+                if (data.confirmation_required) {
+                    payload.product_name = data.product_name || null;
+                    payload.product_id = data.product_id || null;
+                    showConfirmModal(data, {
+                        ...payload,
+                    });
+                    setStatus(
+                        "redeemStatus",
+                        "loading",
+                        data.message || "Redeem code is valid. Please confirm."
+                    );
+                } else if (data.success) {
                     setStatus("redeemStatus", "success", data.message || "Redeemed successfully.");
                     document.getElementById("pinInput").value = "";
                 } else {

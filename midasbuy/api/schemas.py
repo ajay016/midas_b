@@ -14,6 +14,9 @@ class RedeemRequest(BaseModel):
     account_id:   int | None = Field(None, description="MidasbuyAccount ID to use")
     rc_token:     str | None = Field(None, description="Risk-control verification token")
     rc_uuid:      str | None = Field(None, description="Risk-control verification UUID")
+    confirm:      bool = Field(False, description="Submit final redeem confirmation")
+    product_name: str | None = Field(None, description="Product name from the valid-code query")
+    product_id:   str | None = Field(None, description="Product ID from the valid-code query")
 
 
 class PlayerInfo(BaseModel):
@@ -34,6 +37,9 @@ class RedeemResponse(BaseModel):
     success:               bool
     message:               str
     verification_required: bool = False
+    confirmation_required: bool = False
+    product_name:          str | None = None
+    product_id:            str | None = None
     challenge_url:         str | None = None
     risk_sdk_url:          str | None = None
     raw:                   dict | None = None

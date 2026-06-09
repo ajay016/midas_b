@@ -2,6 +2,14 @@ from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
+# Load .env so CAPTCHA_API_KEY / CAPTCHA_PROVIDER / CAPTCHA_APP_ID reach
+# os.getenv() — without this the paid-solver config is invisible to the backend.
+try:
+    from dotenv import load_dotenv
+    load_dotenv(BASE_DIR / ".env")
+except Exception:
+    pass
+
 SECRET_KEY = "django-insecure-change-this-in-production-use-env-var"
 
 DEBUG = True

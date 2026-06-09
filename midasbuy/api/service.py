@@ -22,7 +22,15 @@ logger = logging.getLogger(__name__)
 _APPID = "1450015065"
 _PF    = "mds_pc_browser-yy-android-midasweb-midasbuy-self.midasbuy_saas"
 _BROWSER_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="midasbuy-browser")
+# Separate thread for the captcha solver — it spins up its own sync_playwright,
+# which must not share a thread with the cached session's live Playwright loop.
+_SOLVER_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="midasbuy-captcha")
 _QUERY_REDEEM_ENDPOINT = "/interface/shelfProto/shelves_svr/QueryRedeemCodeInfo"
+
+
+async def _run_solver_call(func, *args):
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(_SOLVER_EXECUTOR, _run_browser_call_sync, func, args)
 
 
 def _run_browser_call_sync(func, args):
@@ -50,6 +58,7 @@ async def shutdown_browser_worker() -> None:
         (),
     )
     _BROWSER_EXECUTOR.shutdown(wait=False, cancel_futures=True)
+    _SOLVER_EXECUTOR.shutdown(wait=False, cancel_futures=True)
 
 
 def _looks_like_encrypt_error(data: Optional[dict]) -> bool:
@@ -214,6 +223,17 @@ def _log_redeem_query_response(data: dict) -> None:
     )
 
 
+def _redeem_product_description(data: dict) -> str:
+    products = data.get("redeem_code_info", {}).get("products", [])
+    return ", ".join(p.get("name", "") for p in products if p.get("name"))
+
+
+def _redeem_first_product_id(data: dict) -> str:
+    products = data.get("redeem_code_info", {}).get("products", [])
+    product = products[0] if products and isinstance(products[0], dict) else {}
+    return str(product.get("product_id") or product.get("shelf_product_id") or "")
+
+
 def _extract_risk_challenge(data: dict) -> tuple[str, str]:
     err_code = str(data.get("err_code") or "")
     if not err_code.startswith("FLEXIBLE_RISK_CONTROL"):
@@ -259,6 +279,59 @@ def _get_risk_sdk_url(storage_state_path: str) -> str:
         )
 
     return "https://cdn.midasbuy.com/h5/overseah5/js/newRiskControlApi.js"
+
+
+def _redeem_result_error_message(data: Optional[dict]) -> str:
+    if not isinstance(data, dict):
+        return (
+            "Redeem code is valid, but the final confirmation response could "
+            "not be verified. Check the account before retrying the same code."
+        )
+
+    ret = data.get("ret")
+    if ret not in (None, 0, "0"):
+        return data.get("msg") or f"Final redemption failed: ret={ret}"
+
+    err_code = data.get("err_code") or data.get("error_code")
+    if err_code:
+        return data.get("msg") or f"Final redemption failed: {err_code}"
+
+    if data.get("order_no") or data.get("portal_serial_no"):
+        logger.info("[REDEEM] final confirmation returned explicit order reference")
+        return ""
+
+    pay_info = data.get("payInfo")
+    current_bind_user = pay_info.get("currentBindUser") if isinstance(pay_info, dict) else None
+    if (
+        data.get("pageHandlerName") == "result"
+        and data.get("type") == "redeem"
+        and data.get("isRedeem") is True
+    ):
+        logger.warning(
+            "[REDEEM] Midasbuy rendered redeem result page without an order "
+            "reference; this is not proof of code consumption openid=%s userid=%s",
+            current_bind_user.get("openid") if isinstance(current_bind_user, dict) else None,
+            current_bind_user.get("userid") if isinstance(current_bind_user, dict) else None,
+        )
+        return (
+            "Midasbuy loaded the redeem result page, but did not return an "
+            "order number or portal serial number. The code has not been "
+            "confirmed as redeemed."
+        )
+
+    logger.warning(
+        "[REDEEM] unexpected final confirmation response top_keys=%s pageHandlerName=%s "
+        "type=%s isRedeem=%s appid=%s",
+        sorted(data.keys())[:60],
+        data.get("pageHandlerName"),
+        data.get("type"),
+        data.get("isRedeem"),
+        data.get("appid"),
+    )
+    return (
+        "Midasbuy loaded the result page, but did not return an explicit "
+        "redemption confirmation. The code has not been marked as redeemed."
+    )
 
 
 async def query_code_info(
@@ -307,6 +380,28 @@ async def query_code_info(
     if ret != 0:
         challenge_type, challenge_url = _extract_risk_challenge(data)
         if challenge_type == "graphic" and challenge_url:
+            # Auto-solve via the paid provider when configured (and we haven't
+            # already supplied a token). Falls back to the frontend manual flow.
+            if not rc_token:
+                try:
+                    from accounts.services.captcha_provider import is_enabled as _captcha_enabled
+                    from accounts.services.playwright_crypto import obtain_rc_token_via_provider
+                except Exception:
+                    _captcha_enabled = lambda: False  # noqa: E731
+                if _captcha_enabled():
+                    logger.info("[REDEEM] graphic risk control — auto-solving via provider")
+                    rc = await _run_solver_call(
+                        obtain_rc_token_via_provider,
+                        challenge_url, storage_state_path, country_code,
+                    )
+                    if rc and rc.get("rc_token") and rc.get("rc_uuid"):
+                        logger.info("[REDEEM] provider produced rc_token — retrying query")
+                        return await query_code_info(
+                            player_id, pin_code, country_code, storage_state_path,
+                            cookies, zone_id, rc["rc_token"], rc["rc_uuid"],
+                        )
+                    logger.warning("[REDEEM] provider did not produce rc_token — falling back to manual")
+
             return RedeemResponse(
                 success=False,
                 message="Security verification is required to continue.",
@@ -322,8 +417,7 @@ async def query_code_info(
             raw=data,
         )
 
-    products = data.get("redeem_code_info", {}).get("products", [])
-    desc = ", ".join(p.get("name", "") for p in products if p.get("name"))
+    desc = _redeem_product_description(data)
     if desc:
         message = f"Redeem code query succeeded: {desc}. Final confirmation flow is pending capture."
     else:
@@ -342,7 +436,52 @@ async def submit_redeem(
     zone_id: str = "1",
     rc_token: Optional[str] = None,
     rc_uuid: Optional[str] = None,
+    confirm: bool = False,
+    product_name: Optional[str] = None,
+    product_id: Optional[str] = None,
 ) -> RedeemResponse:
+    if confirm:
+        logger.info("[REDEEM] submitting final redeem order through Midasbuy SDK")
+        from accounts.services.playwright_crypto import call_redeem_order_in_browser
+
+        result_data = await _run_browser_call(
+            call_redeem_order_in_browser,
+            {
+                "player_id": player_id,
+                "pin_code": pin_code,
+                "country_code": country_code,
+                "appid": _APPID,
+                "game_short_url": "pubgm",
+                "product_id": product_id or "",
+                "product_name": product_name or "",
+            },
+            storage_state_path,
+            country_code,
+        )
+
+        result_error = _redeem_result_error_message(result_data)
+        raw = {
+            "result": result_data,
+        }
+
+        if result_error:
+            logger.warning("[REDEEM] final confirmation failed/unknown: %s", result_error)
+            return RedeemResponse(
+                success=False,
+                message=result_error,
+                raw=raw,
+            )
+
+        message = "Redeemed successfully."
+        if product_name:
+            message = f"Redeemed successfully: {product_name}."
+
+        return RedeemResponse(
+            success=True,
+            message=message,
+            raw=raw,
+        )
+
     check = await query_code_info(
         player_id,
         pin_code,
@@ -356,11 +495,16 @@ async def submit_redeem(
     if not check.success:
         return check
 
+    desc = _redeem_product_description(check.raw or {})
+    product_id = _redeem_first_product_id(check.raw or {})
+    message = "Redeem code is valid. Please confirm redemption."
+    if desc:
+        message = f"Redeem code is valid: {desc}. Please confirm redemption."
     return RedeemResponse(
-        success=True,
-        message=(
-            "Redeem code query succeeded. Final redemption confirmation is not implemented yet; "
-            "capture the successful confirmation request when Midasbuy is available."
-        ),
+        success=False,
+        message=message,
+        confirmation_required=True,
+        product_name=desc or None,
+        product_id=product_id or None,
         raw=check.raw,
     )

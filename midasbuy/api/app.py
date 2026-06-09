@@ -95,4 +95,7 @@ async def redeem(body: RedeemRequest):
         body.zone_id,
         body.rc_token,
         body.rc_uuid,
+        body.confirm,
+        body.product_name,
+        body.product_id,
     )
