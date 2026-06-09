@@ -41,6 +41,11 @@ class Command(BaseCommand):
         parser.add_argument("--account-id", type=int, default=1)
         parser.add_argument("--country", default="bd")
         parser.add_argument("--minutes", type=int, default=30)
+        parser.add_argument(
+            "--block-commit", action="store_true",
+            help="Abort the /result/pubgm request so the code is NOT consumed, while still "
+                 "capturing the xMidas plaintext built just before it.",
+        )
 
     def handle(self, *args, **opts):
         from accounts.models import MidasbuyAccount
@@ -89,6 +94,34 @@ class Command(BaseCommand):
             page = context.new_page()
             _setup_chaos_vm_protection(page)
 
+            # Hook window.xMidas to record the PLAINTEXT it encrypts. Persist to
+            # sessionStorage so it survives the confirm navigation to /result/pubgm
+            # (which otherwise wipes a window-level array).
+            context.add_init_script(r"""
+            () => {
+              try {
+                var KEY = '__xmidasCalls';
+                function record(arg){
+                  try {
+                    var arr = JSON.parse(sessionStorage.getItem(KEY) || '[]');
+                    var v; try { v = JSON.parse(JSON.stringify(arg)); } catch(e){ v = String(arg); }
+                    arr.push(v);
+                    sessionStorage.setItem(KEY, JSON.stringify(arr));
+                  } catch(e) {}
+                }
+                var _v = null;
+                function wrap(fn){
+                  return function(){ record(arguments[0]); return fn.apply(this, arguments); };
+                }
+                Object.defineProperty(window, 'xMidas', {
+                  configurable: true, enumerable: true,
+                  get: function(){ return _v; },
+                  set: function(f){ _v = (typeof f === 'function') ? wrap(f) : f; },
+                });
+              } catch(e) {}
+            }
+            """)
+
             def on_request(req):
                 try:
                     u = req.url
@@ -127,6 +160,27 @@ class Command(BaseCommand):
             page.on("request", on_request)
             page.on("response", on_response)
 
+            if opts["block_commit"]:
+                # Abort the commit so the code is preserved; the xMidas plaintext
+                # is built client-side before this request fires, so we still get it.
+                def _block(route):
+                    try:
+                        if "/result/" in route.request.url:
+                            self.stdout.write(self.style.WARNING("  BLOCKED commit: " + route.request.url[:110]))
+                            route.abort()
+                            return
+                    except Exception:
+                        pass
+                    try:
+                        route.continue_()
+                    except Exception:
+                        pass
+                page.route("**/result/**", _block)
+                self.stdout.write(self.style.WARNING(
+                    "--block-commit ON: the redemption will be aborted (code preserved); "
+                    "we only capture the xMidas plaintext."
+                ))
+
             page.goto(redeem_url, wait_until="load")
             try:
                 _wait_for_xmidas(page, out_dir, 30_000)
@@ -140,10 +194,23 @@ class Command(BaseCommand):
             sentinel = os.path.join(out_dir, "stop_capture.txt")
             self.stdout.write(f"Capturing for up to {opts['minutes']} min. "
                               f"Create {sentinel} (or close the window) to stop early.")
+            dumped_xmidas = 0
             try:
                 while time.time() < deadline:
                     if page.is_closed() or os.path.exists(sentinel):
                         break
+                    # Drain newly captured window.xMidas plaintext inputs
+                    # (sessionStorage survives the confirm navigation).
+                    try:
+                        calls = page.evaluate(
+                            "() => { try { return JSON.parse(sessionStorage.getItem('__xmidasCalls') || '[]'); } catch(e) { return []; } }"
+                        )
+                        for c in calls[dumped_xmidas:]:
+                            dump("\n[XMIDAS-INPUT] " + json.dumps(c)[:8000])
+                            self.stdout.write("  captured xMidas input")
+                        dumped_xmidas = len(calls)
+                    except Exception:
+                        pass
                     time.sleep(1)
             except KeyboardInterrupt:
                 pass

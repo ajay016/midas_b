@@ -29,6 +29,7 @@ import time
 from dataclasses import dataclass, field
 from threading import Lock, get_ident
 from typing import Dict, Optional, Tuple
+from urllib.parse import parse_qs, urlparse
 
 logger = logging.getLogger(__name__)
 
@@ -781,6 +782,72 @@ async ({payloadJson, sdkScript}) => {
             raw: data,
         };
     };
+    const buildDecouplingExtra = (channelId, queryContext, browserParams) => {
+        try {
+            let webpackRequire = null;
+            const chunks = window.webpackChunkjsxui;
+            if (Array.isArray(chunks)) {
+                chunks.push([
+                    [`backend_redeem_${Date.now()}`],
+                    {},
+                    require => { webpackRequire = require; },
+                ]);
+            }
+            const helpers = webpackRequire ? webpackRequire(16984) : null;
+            if (typeof helpers?.Pl === 'function') {
+                return {
+                    source: 'official_webpack_helper',
+                    value: helpers.Pl(channelId, queryContext || {}, browserParams || {}),
+                };
+            }
+        } catch(e) {
+            pushMessage('decoupling_helper_error', String(e));
+        }
+
+        const payInfo = window.SERVER_DATA?.payInfo || {};
+        const ipInfo = payInfo.ipInfo || {};
+        const user = window.SERVER_DATA?.user || {};
+        const reportParams = window.SERVER_DATA?.reportParams || {};
+        const uuidMatch = document.cookie.match(/UUID=([^;]*)/);
+        let fingerId = '';
+        try {
+            fingerId = JSON.parse(localStorage.getItem('midasbuy_fingerid') || '""') || '';
+        } catch(e) {}
+        return {
+            source: 'local_fallback',
+            value: {
+                from: browserParams?.from || reportParams.from || 'self.midasbuy_saas',
+                shelf_debug_id: queryContext?.debug_id || '',
+                loss_level: queryContext?.loss_level || '',
+                active_country: '',
+                register_country: '',
+                ...ipInfo,
+                mall_country: ipInfo.mall_ipcountry || '',
+                referrer_domain: 'self',
+                has_back_btn: '1',
+                midasbuy_login_type: user.providerType || 'not_logged_in',
+                pay_platform: 'pc',
+                midasbuy_adtag: reportParams.adtag || 'no_adtag',
+                live_id: '',
+                ad_id: '',
+                web_language_code: String(payInfo.cgi_language || 'EN').toUpperCase(),
+                charac_seq_id: crypto.randomUUID().replace(/-/g, ''),
+                midasbuy_fingerid: fingerId,
+                if_robot: '0',
+                if_agent: '0',
+                if_traceless: '0',
+                temp_req: JSON.stringify({orderFromUrl: location.href}),
+                tdrc_fp: uuidMatch ? uuidMatch[1] : '',
+                is_set_passkey: '0',
+                is_support_passkey: window.supportPasskey ? '1' : '0',
+                game_player_info: JSON.stringify({
+                    charac_name: payInfo.charac_name || payInfo.currentBindUser?.charac_name || '',
+                    userid: payInfo.userid || payInfo.currentBindUser?.userid || '',
+                }),
+                is_vip_product: '1',
+            },
+        };
+    };
 
     try {
         const input = JSON.parse(payloadJson);
@@ -851,13 +918,14 @@ async ({payloadJson, sdkScript}) => {
         if (serverTimeOffset > 0 && serverTimeOffset <= 15000) serverTimeOffset = 0;
         const pageTime = Date.now() - serverTimeOffset;
         const pagetoken = btoa(`${location.hostname}_${pageTime}_${openid}`);
-        const pf = payInfo.pf || 'mds_pc_browser-yy-android-midasweb-midasbuy-self.midasbuy_saas';
+        const pf = 'mds_hkweb_pc-v2-android-midasweb-midasbuy';
         const country = String(payInfo.country || sd.country || input.country_code || 'BD').toUpperCase();
         const currencyType = String(payInfo.currency_type || sd.currency_type || 'BDT');
-        const rawPageId = String(payInfo.pageid || ri.pageid || Math.random()).replace(/^page_/, '');
-        const pageId = rawPageId || String(Math.random()).slice(2, 19);
-        const buyTypeKey = `CURRENT_BUY_ITEM_REDEEM_page_${pageId}`;
-        const callbackBase = `${location.protocol}//${location.hostname}${location.port ? ':' + location.port : ''}/callback/`;
+        const localPageId = String(payInfo.pageid || `page_${String(Math.random()).slice(2, 19)}`);
+        const orderPageId = String(ri.pageid || rp.pageid || localPageId.replace(/^page_/, ''));
+        const buyTypeKey = `CURRENT_BUY_ITEM_REDEEM_${localPageId}`;
+        const callbackBase = `${location.protocol}//${location.hostname}:${location.port}/callback/`;
+        const messageBase = `${location.protocol}//${location.hostname}:${location.port}`;
 
         payInfo.appid = appid;
         payInfo.openid = openid;
@@ -889,61 +957,54 @@ async ({payloadJson, sdkScript}) => {
         });
 
         const cgiExtend = {
-            device_id: deviceId,
-            order_refer: '',
             pagetoken,
-            tdrc_fp: tdrcFp,
-            muid,
+            device_id: deviceId,
         };
-        if (payInfo.ipInfo?.mall_ip) cgiExtend.mall_ip = payInfo.ipInfo.mall_ip;
+        const queryContext = input.query_context || {};
+        const decoupling = buildDecouplingExtra(
+            'MIDASBUY_REDEEM',
+            queryContext,
+            {from: rp.from || 'self.midasbuy_saas'},
+        );
+        decoupling.value.game_player_info = JSON.stringify({
+            charac_name: verifiedPlayer.charac_name || payInfo.charac_name ||
+                payInfo.currentBindUser?.charac_name || '',
+            userid,
+        });
+        decoupling.value.is_vip_product = '1';
 
         const params = {
-            pageid: `page_${pageId}`,
             appid,
-            openid,
-            sandbox: payInfo.sandbox || '',
-            pf,
-            platform: payInfo.platform || 'android',
-            isShelfRule: +!!sd.isShelfRule,
-            drm_info: encodeURIComponent(queryString(payInfo.drm_info || {})),
-            usePC: '1',
-            pfkey: payInfo.pfkey || '',
-            currency_type: currencyType,
-            country,
-            session_id: 'hy_gameid',
-            session_type: 'st_dummy',
-            zoneid,
-            charac_no: userid,
-            productid: productId,
-            origin_product_id: productId,
-            ca: '0',
-            pendingUrl: `${callbackBase}pending?isFromJsx=true&buy_type_key=${buyTypeKey}`,
-            successUrl: `${callbackBase}success?isFromJsx=true&buy_type_key=${buyTypeKey}`,
-            failUrl: `${callbackBase}fail?isFromJsx=true&buy_type_key=${buyTypeKey}`,
-            msgUrl: location.href,
-            version: 'midasbuy_v2',
-            localKey: buyTypeKey,
-            app_metadata: encodeURIComponent(`muid=${muid || ''}`),
-            cgi_extend: queryString(cgiExtend).replace(/[!'()]/g, ''),
-            shelf_product_id: productId,
-            quantity: '1',
             shop_id: payInfo.shop_id || 'midasbuy',
-            promotions: '[]',
-            from: pf,
-            num: '1',
-            send: '0',
-            gift: '',
-            buyTypeKey,
-            image_url: '',
-            lan: (sd.countryInfo?.iso?.language || 'en').split('-')[0],
             channel: 'os_midaspay_v2',
             subchannel: 'MIDASBUY_REDEEM',
-            id: 'MIDASBUY_REDEEM',
-            productId,
-            newtab: 0,
+            muid,
+            openid,
+            country,
+            shelf_product_id: productId,
+            zoneid,
+            currency_type: currencyType,
+            platform: payInfo.platform || 'android',
+            redeem_code: cleanCode,
+            direct_redeem: '1',
+            newtab: '0',
+            productid: '',
+            msgUrl: `${messageBase}/receivemsg?buy_type_key=${buyTypeKey}`,
+            pendingUrl: `${callbackBase}pending?buy_type_key:REDEEM`,
+            successUrl: `${callbackBase}success?buy_type_key=REDEEM`,
+            failUrl: `${callbackBase}fail?buy_type_key=REDEEM`,
+            sandbox: '0',
+            pf,
+            is_vip_product: 'true',
+            charac_no: userid,
+            drm_info: encodeURIComponent(queryString(payInfo.drm_info || {})),
+            pageid: orderPageId,
+            decouplingExtraParams: queryString(decoupling.value),
+            cgi_extend: queryString(cgiExtend),
+            buytype: 'save',
+            lan: (sd.countryInfo?.iso?.language || 'en').split('-')[0],
             usePost: '1',
             target: iframe.contentWindow,
-            redeem_code: cleanCode,
         };
 
         const result = await new Promise(resolve => {
@@ -1019,6 +1080,13 @@ async ({payloadJson, sdkScript}) => {
                 buy_type_key: buyTypeKey,
                 channel: params.channel,
                 subchannel: params.subchannel,
+                pageid: params.pageid,
+                pf: params.pf,
+                productid: params.productid,
+                shelf_product_id: params.shelf_product_id,
+                direct_redeem: params.direct_redeem,
+                decoupling_source: decoupling.source,
+                decoupling_length: params.decouplingExtraParams.length,
                 has_redeem_code: !!cleanCode,
                 has_target: !!params.target,
                 cgi_extend_len: params.cgi_extend.length,
@@ -1378,7 +1446,7 @@ def _create_cached_session(
     try:
         manager = sync_playwright()
         p = manager.start()
-        browser, context = _launch_context(p, storage_state_path, country_code)
+        browser, context = _launch_context(p, storage_state_path, country_code, bypass_csp=True)
         page = context.new_page()
 
         _setup_lightweight_routes(page)
@@ -1671,6 +1739,54 @@ def _sdk_redeem_error_message(result: dict) -> str:
     return error
 
 
+def _eval_main_world_async(page, fn_source: str, args: dict, timeout_ms: int) -> Optional[dict]:
+    """
+    Run an async arrow function (fn_source, e.g. _JS_REDEEM_ORDER) in the page
+    MAIN world — where window.midas lives — instead of patchright's isolated
+    world, and poll the JSON result back via a DOM element. Requires bypass_csp.
+    """
+    nonce = os.urandom(6).hex()
+    page.evaluate(
+        """(a) => {
+            const inEl = document.createElement('div');
+            inEl.id = '__ro_in_' + a.nonce; inEl.style.display = 'none';
+            inEl.textContent = a.input;
+            inEl.setAttribute('data-fn', a.fn);
+            document.documentElement.appendChild(inEl);
+            const outEl = document.createElement('div');
+            outEl.id = '__ro_out_' + a.nonce; outEl.style.display = 'none';
+            document.documentElement.appendChild(outEl);
+            const s = document.createElement('script');
+            s.textContent =
+                '(function(){var i=document.getElementById("__ro_in_' + a.nonce + '");' +
+                'var o=document.getElementById("__ro_out_' + a.nonce + '");try{' +
+                'var fn=(0,eval)("(" + i.getAttribute("data-fn") + ")");' +
+                'Promise.resolve(fn(JSON.parse(i.textContent))).then(function(r){' +
+                'o.textContent=JSON.stringify(r===undefined?null:r);}).catch(function(e){' +
+                'o.textContent=JSON.stringify({error:"mainworld_exception",detail:String(e)});});' +
+                '}catch(e){o.textContent=JSON.stringify({error:"mainworld_eval",detail:String(e)});}})();';
+            document.documentElement.appendChild(s);
+            s.remove();
+        }""",
+        {"nonce": nonce, "input": json.dumps(args), "fn": fn_source},
+    )
+
+    import time as _t
+    deadline = _t.time() + timeout_ms / 1000.0
+    while _t.time() < deadline:
+        raw = page.evaluate(
+            "(n) => { const o = document.getElementById('__ro_out_' + n); return o && o.textContent ? o.textContent : null; }",
+            nonce,
+        )
+        if raw:
+            try:
+                return json.loads(raw)
+            except Exception:
+                return {"error": "mainworld_bad_json"}
+        page.wait_for_timeout(500)
+    return {"error": "mainworld_timeout"}
+
+
 def call_redeem_order_in_browser(
     payload: dict,
     storage_state_path: str,
@@ -1735,15 +1851,37 @@ def call_redeem_order_in_browser(
 
             def _on_response(resp):
                 _record_network_event("response", resp)
+                # Save the result-page / callback bodies for debugging the commit.
+                try:
+                    u = resp.url.lower()
+                    if "/result/" in u or "/callback/" in u:
+                        body = None
+                        try:
+                            body = resp.text()
+                        except Exception:
+                            body = None
+                        dbg = os.path.join(os.path.dirname(storage_state_path), "redeem_commit_debug.txt")
+                        with open(dbg, "a", encoding="utf-8") as f:
+                            f.write(f"\n<< {resp.status} {resp.url.split('encrypt_msg=',1)[0]}\n")
+                            if body:
+                                f.write(body[:60000] + "\n")
+                        logger.info("[CRYPTO] redeem commit %s %s (saved to redeem_commit_debug.txt)",
+                                    resp.status, resp.url.split("encrypt_msg=", 1)[0][:110])
+                except Exception:
+                    pass
 
             try:
-                logger.info("[CRYPTO] cached redeem SDK order attempt=%d", attempt)
+                logger.info("[CRYPTO] cached redeem SDK order attempt=%d (main world)", attempt)
                 session.page.on("request", _on_request)
                 session.page.on("response", _on_response)
-                result = session.page.evaluate(_JS_REDEEM_ORDER, {
-                    "payloadJson": payload_json,
-                    "sdkScript": sdk_script,
-                })
+                # window.midas lives in the MAIN world; patchright evaluate is
+                # isolated, so run the order there via the main-world bridge.
+                result = _eval_main_world_async(
+                    session.page,
+                    _JS_REDEEM_ORDER,
+                    {"payloadJson": payload_json, "sdkScript": sdk_script},
+                    18_000,
+                )
                 session.last_used = time.time()
             except Exception:
                 logger.exception("[CRYPTO] cached redeem SDK order evaluate failed")
@@ -1761,6 +1899,31 @@ def call_redeem_order_in_browser(
             if not result:
                 logger.error("[CRYPTO] redeem SDK order evaluate returned None")
                 return None
+
+            success_callback = next(
+                (
+                    event for event in network_events
+                    if event.get("kind") == "response"
+                    and event.get("status") == 200
+                    and "/callback/success" in event.get("url", "")
+                ),
+                None,
+            )
+            if success_callback:
+                callback_query = parse_qs(urlparse(success_callback["url"]).query)
+                order_no = (callback_query.get("order_no") or [""])[0]
+                order_no_hash = (callback_query.get("order_no_hash") or [""])[0]
+                if order_no and order_no_hash:
+                    result.update(
+                        {
+                            "ok": True,
+                            "error": None,
+                            "source": "callback_success",
+                            "order_no": order_no,
+                            "order_no_hash": order_no_hash,
+                            "callback_url": success_callback["url"],
+                        }
+                    )
 
             if result.get("error") in {
                 "no_xmidas_token",

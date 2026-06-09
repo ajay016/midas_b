@@ -459,26 +459,59 @@ async def submit_redeem(
             country_code,
         )
 
-        result_error = _redeem_result_error_message(result_data)
-        raw = {
-            "result": result_data,
-        }
+        if (
+            isinstance(result_data, dict)
+            and result_data.get("source") == "callback_success"
+            and result_data.get("order_no")
+            and result_data.get("order_no_hash")
+        ):
+            message = "Redeemed successfully."
+            if product_name:
+                message = f"Redeemed successfully: {product_name}."
+            logger.info(
+                "[REDEEM] confirmed by Midasbuy success callback order_no=%s",
+                result_data.get("order_no"),
+            )
+            return RedeemResponse(
+                success=True,
+                message=message,
+                raw={"result": result_data},
+            )
 
-        if result_error:
-            logger.warning("[REDEEM] final confirmation failed/unknown: %s", result_error)
+        # Some SDK paths do not expose the success callback to the caller.
+        # For those ambiguous outcomes, re-querying the code is the definitive
+        # false-positive-proof check.
+        logger.info("[REDEEM] verifying redemption by re-querying the code")
+        verify = await query_code_info(
+            player_id, pin_code, country_code, storage_state_path, cookies, zone_id,
+        )
+        verify_raw = verify.raw if isinstance(verify.raw, dict) else {}
+        err_code = str(verify_raw.get("err_code") or "")
+        ret = verify_raw.get("ret")
+        raw = {"result": result_data, "verify": verify_raw}
+
+        if err_code == "REDEEM_CODE_ALREADY_USED":
+            message = "Redeemed successfully."
+            if product_name:
+                message = f"Redeemed successfully: {product_name}."
+            logger.info("[REDEEM] confirmed redeemed (code now reports already used)")
+            return RedeemResponse(success=True, message=message, raw=raw)
+
+        if ret == 0 or verify.confirmation_required:
+            logger.warning("[REDEEM] code still valid after confirm — redemption did NOT go through")
             return RedeemResponse(
                 success=False,
-                message=result_error,
+                message="Redemption did not go through — the code is still valid. Please try confirming again.",
                 raw=raw,
             )
 
-        message = "Redeemed successfully."
-        if product_name:
-            message = f"Redeemed successfully: {product_name}."
-
+        logger.warning("[REDEEM] could not verify redemption: err_code=%s ret=%s", err_code, ret)
         return RedeemResponse(
-            success=True,
-            message=message,
+            success=False,
+            message=(
+                "Could not verify the redemption. Check the account before retrying — "
+                f"the code may already be consumed. ({_redeem_result_error_message(result_data)})"
+            ),
             raw=raw,
         )
 
